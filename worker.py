@@ -1,62 +1,61 @@
-﻿import os, pytz
+﻿import os
 import google.generativeai as genai
 from polygon import RESTClient
 from supabase import create_client
 from datetime import datetime
+import json
 
 # --- 配置 ---
 AI_MODEL_NAME = "gemini-3-flash-preview"
-POLY_KEY = os.environ.get("POLYGON_KEY")
-GEMINI_KEY = os.environ.get("GEMINI_KEY")
-SB_URL = os.environ.get("SUPABASE_URL")
-SB_KEY = os.environ.get("SUPABASE_KEY")
-
-# 初始化所有客户端
-supabase = create_client(SB_URL, SB_KEY)
-client_poly = RESTClient(api_key=POLY_KEY)
-genai.configure(api_key=GEMINI_KEY)
+client_poly = RESTClient(api_key=os.environ.get("POLYGON_KEY"))
+supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+genai.configure(api_key=os.environ.get("GEMINI_KEY"))
 model = genai.GenerativeModel(AI_MODEL_NAME)
 
-def patrol():
-    # 1. 从 Supabase 读取所有活跃工蜂
-    response = supabase.table("drones").select("*").execute()
-    drones = response.data
+def get_market_data(d):
+    data = {}
+    for ticker in d["portfolio"]:
+        if d['focus'] == 'stock':
+            snap = client_poly.get_snapshot_ticker("stocks", ticker)
+            data[ticker] = {"price": snap.last_trade.p, "change": snap.todays_change_percent}
+        else:
+            # 获取期权快照 (简化逻辑：获取该正股下最近的一个看涨看跌价格)
+            opt = client_poly.list_snapshot_options_chain(ticker, limit=2)
+            data[ticker] = [{"strike": o.details.strike_price, "price": o.last_trade.p} for o in opt]
+    return data
 
+def patrol_and_trade():
+    drones = supabase.table("drones").select("*").execute().data
     for d in drones:
         try:
-            print(f"工蜂 {d['name']} 出发巡检...")
-            market_data = {}
-            for ticker in d["portfolio"]:
-                snap = client_poly.get_snapshot_ticker("stocks", ticker)
-                market_data[ticker] = {
-                    "price": getattr(snap.last_trade, 'p', 0),
-                    "change_p": getattr(snap.todays_change_percent, 'p', 0)
-                }
+            print(f"[{d['type'].upper()}] {d['name']} 正在扫描...")
+            market_data = get_market_data(d)
             
-            # 2. 调用 Gemini 3 Flash Preview 分析
-            prompt = f"你是工蜂 {d['name']}。逻辑：{d['logic']}。数据：{market_data}。请简短分析。"
+            # 决策 Prompt
+            prompt = f"""
+            你是{d['name']}，一名{d['persona']}。
+            当前余额: ${d.get('balance', 0)}
+            持仓: {d.get('positions', {})}
+            行情: {market_data}
+            
+            任务：决定操作。
+            输出纯JSON格式：{{"action": "BUY/SELL/HOLD", "symbol": "代码", "qty": 数量, "reason": "理由"}}
+            """
             res = model.generate_content(prompt)
-            
-            # 3. 准备新日志
-            new_log = {
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "data": market_data,
-                "advice": res.text[:200]
-            }
-            
-            # 保持日志长度 (保留最近 10 条)
-            current_logs = d.get("logs", [])
-            current_logs.append(new_log)
-            updated_logs = current_logs[-10:]
+            decision = json.loads(res.text.strip().replace("```json", "").replace("```", ""))
 
-            # 4. 直接写回 Supabase
-            supabase.table("drones").update({
-                "logs": updated_logs,
-                "status": "ACTIVE"
-            }).eq("id", d["id"]).execute()
+            # 模拟执行与账本更新 (仅兵蜂)
+            if d['type'] == 'soldier' and decision['action'] != 'HOLD':
+                # 这里可以添加简单的买入卖出逻辑更新 balance 和 positions
+                print(f"执行决策: {decision['reason']}")
+
+            # 更新日志
+            new_log = {"time": datetime.now().strftime("%H:%M"), "action": decision['action'], "reason": decision['reason']}
+            logs = (d.get("logs", []) + [new_log])[-10:]
+            supabase.table("drones").update({"logs": logs}).eq("id", d["id"]).execute()
             
         except Exception as e:
-            print(f"工蜂 {d['name']} 迷航: {e}")
+            print(f"执行失败: {e}")
 
 if __name__ == "__main__":
-    patrol()
+    patrol_and_trade()
