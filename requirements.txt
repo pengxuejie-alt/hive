@@ -1,3 +1,6 @@
+streamlit
+pandas
+supabase
 google-generativeai
 polygon-api-client
 pytz
