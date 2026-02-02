@@ -1,0 +1,5 @@
+google-generativeai
+polygon-api-client
+pytz
+pandas
+streamlit
