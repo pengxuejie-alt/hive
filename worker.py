@@ -1,4 +1,4 @@
-import os, json, pytz
+﻿import os, json, pytz
 import google.generativeai as genai
 from polygon import RESTClient
 from datetime import datetime
@@ -72,7 +72,7 @@ def patrol():
             请重点分析组合内标的的联动性，是否存在分化？给出采蜜建议（保持/买入/卖出）并简述理由。
             """
             response = model.generate_content(prompt)
-            
+            pip install google-generativeai polygon-api-client pytz
             # 4. 记录日志 (Honey Collection)
             new_log = {
                 "time": datetime.now().strftime("%H:%M"),

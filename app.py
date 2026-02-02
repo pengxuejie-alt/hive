@@ -10,7 +10,7 @@ st.set_page_config(page_title="Hive | 蜂巢控制系统", layout="wide", page_i
 
 @st.cache_resource
 def init_queen():
-    return genai.GenerativeModel("gemini-1.5-flash")
+    return genai.GenerativeModel("gemini-3-flash")
 
 try:
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
