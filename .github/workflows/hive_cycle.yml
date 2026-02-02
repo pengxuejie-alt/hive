@@ -2,37 +2,29 @@ name: Hive Ecology Cycle
 
 on:
   schedule:
-    - cron: '0 * * * 1-5' # 美东时间周一至周五，每小时整点运行一次
-  workflow_dispatch:      # 允许你在网页上手动点“运行”，方便调试
+    - cron: '0 * * * *' # 每小时自动巡检一次
+  workflow_dispatch:      # 支持手动触发
 
 jobs:
   swarm-patrol:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Hive Code
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
-          pip install google-generativeai polygon-api-client pytz
+          pip install google-generativeai polygon-api-client pytz supabase
 
       - name: Drones Patroling
         env:
           GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
           POLYGON_KEY: ${{ secrets.POLYGON_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python worker.py
-
-      - name: Sync Hive Memory
-        run: |
-          git config --local user.email "hive-bot@github.com"
-          git config --local user.name "Hive-Bot"
-          git add hive.json
-          # 如果文件没变动，commit 会跳过而不会报错
-          git commit -m "chore: 蜂巢巡检数据同步 [skip ci]" || exit 0
-          git push

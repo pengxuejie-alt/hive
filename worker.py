@@ -1,74 +1,62 @@
-﻿import os, json, pytz
+﻿import os, pytz
 import google.generativeai as genai
 from polygon import RESTClient
+from supabase import create_client
 from datetime import datetime
 
 # --- 配置 ---
 AI_MODEL_NAME = "gemini-3-flash-preview"
 POLY_KEY = os.environ.get("POLYGON_KEY")
 GEMINI_KEY = os.environ.get("GEMINI_KEY")
-HIVE_FILE = "hive.json"
+SB_URL = os.environ.get("SUPABASE_URL")
+SB_KEY = os.environ.get("SUPABASE_KEY")
 
-client = RESTClient(api_key=POLY_KEY)
+# 初始化所有客户端
+supabase = create_client(SB_URL, SB_KEY)
+client_poly = RESTClient(api_key=POLY_KEY)
 genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel(AI_MODEL_NAME)
 
-def is_market_open():
-    tz_ny = pytz.timezone('US/Eastern')
-    tz_hk = pytz.timezone('Asia/Hong_Kong')
-    now_ny = datetime.now(tz_ny)
-    now_hk = datetime.now(tz_hk)
-    # 美股或港股周一至周五 09:30 - 16:00
-    us_open = now_ny.weekday() < 5 and (9 <= now_ny.hour < 16)
-    hk_open = now_hk.weekday() < 5 and (9 <= now_hk.hour < 16)
-    return us_open or hk_open
-
-def load_hive():
-    if os.path.exists(HIVE_FILE):
-        try:
-            with open(HIVE_FILE, "r", encoding='utf-8') as f: return json.load(f)
-        except: pass
-    return {"drones": []}
-
-def save_hive(data):
-    with open(HIVE_FILE, "w", encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
 def patrol():
-    hive = load_hive()
-    if not is_market_open():
-        print("☕ 非交易时段，工蜂休息。")
-        return
+    # 1. 从 Supabase 读取所有活跃工蜂
+    response = supabase.table("drones").select("*").execute()
+    drones = response.data
 
-    for drone in hive.get("drones", []):
+    for d in drones:
         try:
-            print(f"工蜂 {drone['name']} 正在巡检...")
+            print(f"工蜂 {d['name']} 出发巡检...")
             market_data = {}
-            for ticker in drone["portfolio"]:
-                try:
-                    snap = client.get_snapshot_ticker("stocks", ticker)
-                    market_data[ticker] = {
-                        "price": getattr(snap.last_trade, 'p', 0),
-                        "change_p": getattr(snap.todays_change_percent, 'p', 0)
-                    }
-                except: continue
+            for ticker in d["portfolio"]:
+                snap = client_poly.get_snapshot_ticker("stocks", ticker)
+                market_data[ticker] = {
+                    "price": getattr(snap.last_trade, 'p', 0),
+                    "change_p": getattr(snap.todays_change_percent, 'p', 0)
+                }
             
-            if not market_data: continue
-
-            prompt = f"你是工蜂 {drone['name']}。逻辑：{drone['logic']}。当前数据：{market_data}。请简短分析并给建议。"
-            response = model.generate_content(prompt)
+            # 2. 调用 Gemini 3 Flash Preview 分析
+            prompt = f"你是工蜂 {d['name']}。逻辑：{d['logic']}。数据：{market_data}。请简短分析。"
+            res = model.generate_content(prompt)
             
+            # 3. 准备新日志
             new_log = {
-                "time": datetime.now().strftime("%H:%M"),
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "data": market_data,
-                "advice": response.text[:200]
+                "advice": res.text[:200]
             }
-            drone.setdefault("logs", []).append(new_log)
-            drone["logs"] = drone["logs"][-10:] # 只留最近10条
+            
+            # 保持日志长度 (保留最近 10 条)
+            current_logs = d.get("logs", [])
+            current_logs.append(new_log)
+            updated_logs = current_logs[-10:]
+
+            # 4. 直接写回 Supabase
+            supabase.table("drones").update({
+                "logs": updated_logs,
+                "status": "ACTIVE"
+            }).eq("id", d["id"]).execute()
+            
         except Exception as e:
-            print(f"错误: {e}")
-    
-    save_hive(hive)
+            print(f"工蜂 {d['name']} 迷航: {e}")
 
 if __name__ == "__main__":
     patrol()
