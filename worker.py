@@ -1,9 +1,9 @@
 ﻿import os
+import json
 import google.generativeai as genai
 from polygon import RESTClient
 from supabase import create_client
 from datetime import datetime
-import json
 
 # --- 配置 ---
 AI_MODEL_NAME = "gemini-3-flash-preview"
@@ -12,50 +12,62 @@ supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABAS
 genai.configure(api_key=os.environ.get("GEMINI_KEY"))
 model = genai.GenerativeModel(AI_MODEL_NAME)
 
-def get_market_data(d):
-    data = {}
+def fetch_data(d):
+    results = {}
     for ticker in d["portfolio"]:
-        if d['focus'] == 'stock':
-            snap = client_poly.get_snapshot_ticker("stocks", ticker)
-            data[ticker] = {"price": snap.last_trade.p, "change": snap.todays_change_percent}
-        else:
-            # 获取期权快照 (简化逻辑：获取该正股下最近的一个看涨看跌价格)
-            opt = client_poly.list_snapshot_options_chain(ticker, limit=2)
-            data[ticker] = [{"strike": o.details.strike_price, "price": o.last_trade.p} for o in opt]
-    return data
+        try:
+            if d['focus'] == 'stock':
+                snap = client_poly.get_snapshot_ticker("stocks", ticker)
+                results[ticker] = {"price": snap.last_trade.p, "change": snap.todays_change_percent}
+            else:
+                opts = client_poly.list_snapshot_options_chain(ticker, limit=3)
+                results[ticker] = [{"strike": o.details.strike_price, "price": o.last_trade.p, "type": o.details.contract_type} for o in opts]
+        except: results[ticker] = "Data Unavailable"
+    return results
 
-def patrol_and_trade():
+def patrol():
     drones = supabase.table("drones").select("*").execute().data
     for d in drones:
         try:
-            print(f"[{d['type'].upper()}] {d['name']} 正在扫描...")
-            market_data = get_market_data(d)
+            print(f"--- {d['name']} ({d['type']}) 执行中 ---")
+            market_data = fetch_data(d)
             
-            # 决策 Prompt
-            prompt = f"""
-            你是{d['name']}，一名{d['persona']}。
-            当前余额: ${d.get('balance', 0)}
-            持仓: {d.get('positions', {})}
-            行情: {market_data}
-            
-            任务：决定操作。
-            输出纯JSON格式：{{"action": "BUY/SELL/HOLD", "symbol": "代码", "qty": 数量, "reason": "理由"}}
-            """
-            res = model.generate_content(prompt)
-            decision = json.loads(res.text.strip().replace("```json", "").replace("```", ""))
+            if d['type'] == 'soldier':
+                prompt = f"交易员兵蜂 {d['name']}。性格：{d['persona']}。资金：{d['balance']}。持仓：{d['positions']}。行情：{market_data}。输出纯JSON：{{'action': 'BUY/SELL/HOLD', 'symbol': '代码', 'qty': 数量, 'price': 价格, 'reason': '理由'}}"
+            else:
+                prompt = f"工蜂 {d['name']}。逻辑：{d['logic']}。数据：{market_data}。请简短分析建议。"
 
-            # 模拟执行与账本更新 (仅兵蜂)
-            if d['type'] == 'soldier' and decision['action'] != 'HOLD':
-                # 这里可以添加简单的买入卖出逻辑更新 balance 和 positions
-                print(f"执行决策: {decision['reason']}")
+            res = model.generate_content(prompt).text.strip()
+            clean_res = res.replace("```json", "").replace("```", "").strip()
 
-            # 更新日志
-            new_log = {"time": datetime.now().strftime("%H:%M"), "action": decision['action'], "reason": decision['reason']}
-            logs = (d.get("logs", []) + [new_log])[-10:]
-            supabase.table("drones").update({"logs": logs}).eq("id", d["id"]).execute()
+            update_payload = {}
+            log_info = ""
+
+            if d['type'] == 'soldier':
+                decision = json.loads(clean_res)
+                log_info = f"{decision['action']} {decision['qty']} {decision['symbol']}: {decision['reason']}"
+                
+                # 模拟简单账本更新
+                if decision['action'] == 'BUY':
+                    cost = decision['qty'] * decision['price']
+                    if d['balance'] >= cost:
+                        update_payload['balance'] = d['balance'] - cost
+                        new_pos = d['positions'].copy()
+                        new_pos[decision['symbol']] = new_pos.get(decision['symbol'], 0) + decision['qty']
+                        update_payload['positions'] = new_pos
+                elif decision['action'] == 'SELL':
+                    # 此处可添加卖出逻辑...
+                    pass
+            else:
+                log_info = clean_res[:150]
+
+            # 统一更新数据库
+            new_log = {"time": datetime.now().strftime("%H:%M"), "info": log_info}
+            update_payload['logs'] = (d.get("logs", []) + [new_log])[-10:]
+            supabase.table("drones").update(update_payload).eq("id", d["id"]).execute()
             
         except Exception as e:
-            print(f"执行失败: {e}")
+            print(f"单位 {d['name']} 异常: {e}")
 
 if __name__ == "__main__":
-    patrol_and_trade()
+    patrol()
