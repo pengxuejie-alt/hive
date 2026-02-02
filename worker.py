@@ -1,70 +1,72 @@
-﻿import os
-import json
+﻿import os, json
 import google.generativeai as genai
 from polygon import RESTClient
 from supabase import create_client
 from datetime import datetime, timezone
 
-# --- 配置 ---
-AI_MODEL_NAME = "gemini-3-flash-preview"
+# --- 初始化 ---
 client_poly = RESTClient(api_key=os.environ.get("POLYGON_KEY"))
 supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 genai.configure(api_key=os.environ.get("GEMINI_KEY"))
-model = genai.GenerativeModel(AI_MODEL_NAME)
+model = genai.GenerativeModel("gemini-3-flash-preview")
 
-def calculate_roi_hr(d):
-    """计算每小时收益率以对齐生命周期"""
-    start_time = datetime.fromisoformat(d['created_at'].replace('Z', '+00:00'))
-    hours_alive = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
-    if hours_alive < 0.1: return 0, hours_alive
+def get_market_data(d):
+    obs = {}
+    for t in d["portfolio"]:
+        try:
+            if d['focus'] == 'stock':
+                s = client_poly.get_snapshot_ticker("stocks", t)
+                obs[t] = {"price": s.last_trade.p, "change": s.todays_change_percent}
+            else:
+                o = client_poly.list_snapshot_options_chain(t, limit=2)
+                obs[t] = [{"strike": x.details.strike_price, "price": x.last_trade.p} for x in o]
+        except: obs[t] = "N/A"
+    return obs
+
+def patrol_and_evolve():
+    res = supabase.table("drones").select("*").execute()
+    drones = res.data
     
-    net_profit = d['balance'] - d['initial_balance']
-    roi_total = (net_profit / d['initial_balance']) if d['initial_balance'] > 0 else 0
-    return (roi_total / hours_alive), hours_alive
-
-def natural_selection():
-    """物竞天择：自动淘汰末位表现者"""
-    print("--- 启动物竞天择程序 ---")
-    res = supabase.table("drones").select("*").eq("type", "soldier").execute()
-    soldiers = res.data
-    
-    if len(soldiers) < 5: 
-        print("兵蜂数量不足，暂不启动淘汰。")
-        return
-
-    # 1. 筛选出已过“新手保护期”（存活超过12小时）的蜂
-    candidates = []
-    for s in soldiers:
-        roi_hr, age = calculate_roi_hr(s)
-        if age > 12: # 12小时观察期
-            s['roi_hr'] = roi_hr
-            candidates.append(s)
-    
-    if not candidates: return
-
-    # 2. 按 ROI/hr 排序，找出末位 30%
-    candidates.sort(key=lambda x: x['roi_hr'])
-    kill_count = max(1, int(len(candidates) * 0.3))
-    losers = candidates[:kill_count]
-
-    for l in losers:
-        if l['roi_hr'] < 0: # 只有亏损的才会被自动淘汰
-            print(f"💀 淘汰劣等蜂: {l['name']} (ROI/hr: {l['roi_hr']:.4%})")
-            supabase.table("drones").delete().eq("id", l['id']).execute()
-
-def patrol():
-    """常规巡检与交易决策"""
-    drones = supabase.table("drones").select("*").execute().data
     for d in drones:
         try:
-            # (此处保留之前的 fetch_data 和 Gemini 决策逻辑...)
-            # 简化版逻辑演示：
-            print(f"🐝 {d['name']} 正在执行任务...")
-            # ... 决策与数据库更新 ...
-        except Exception as e:
-            print(f"Error in {d['name']}: {e}")
+            # 1. 决策阶段：带入 Memory
+            m_data = get_market_data(d)
+            prompt = f"""
+            你是兵蜂 {d['name']}。性格：{d['persona']}。
+            历史教训：{d.get('memory')}
+            持仓：{d['positions']} | 现金：{d['balance']}
+            实时行情：{m_data}
+            请决策并写下本次学到的教训(learning)。
+            返回JSON：{{"action":"BUY/SELL/HOLD","symbol":"...","qty":0,"price":0,"reason":"...","learning":"..."}}
+            """
+            response = model.generate_content(prompt).text.strip()
+            decision = json.loads(response.replace("```json", "").replace("```", ""))
+            
+            # 2. 模拟执行
+            update_fields = {}
+            if decision['action'] == 'BUY':
+                cost = decision['qty'] * decision['price']
+                if d['balance'] >= cost:
+                    update_fields['balance'] = d['balance'] - cost
+                    new_pos = d.get('positions', {}).copy()
+                    new_pos[decision['symbol']] = new_pos.get(decision['symbol'], 0) + decision['qty']
+                    update_fields['positions'] = new_pos
+            
+            # 3. 经验积累与峰值记录
+            update_fields['memory'] = f"上一次学习：{decision['learning']}"
+            if d['balance'] > d.get('peak_balance', 0):
+                update_fields['peak_balance'] = d['balance']
+                
+            # 4. 更新数据库
+            new_log = {"t": datetime.now().strftime("%H:%M"), "msg": decision['reason']}
+            update_fields['logs'] = (d.get("logs", []) + [new_log])[-10:]
+            supabase.table("drones").update(update_fields).eq("id", d["id"]).execute()
+            print(f"✅ {d['name']} 任务完成并已学习。")
+
+        except Exception as e: print(f"❌ {d['name']} 出错: {e}")
+
+    # 5. 物竞天择 (淘汰存活 > 12h 且 ROI < 0 的末位)
+    # ... 此处可复用之前提到的 natural_selection 逻辑
 
 if __name__ == "__main__":
-    # 执行顺序：先干活，再根据战果优胜劣汰
-    patrol()
-    natural_selection()
+    patrol_and_evolve()
