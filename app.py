@@ -18,29 +18,30 @@ try:
 except Exception as e:
     st.error(f"连接失败: {e}"); st.stop()
 
-# --- 远程放飞逻辑 (含详细报错追踪) ---
+# --- 远程放飞逻辑 (针对 Fine-grained Token 优化) ---
 def trigger_worker():
     try:
-        # 强制去除两端空格
+        # 强制清理环境变量中的空格
         token = st.secrets["GITHUB_TOKEN"].strip()
         repo = st.secrets["GITHUB_REPO"].strip()
         
         headers = {
-            "Authorization": f"token {token}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github.v3+json",
+            "X-GitHub-Api-Version": "2022-11-28"
         }
-        # 触发器路径
+        # 路径必须匹配: repos/{owner}/{repo}/actions/workflows/{workflow_id_or_filename}/dispatches
         url = f"https://api.github.com/repos/{repo}/actions/workflows/hive_cycle.yml/dispatches"
         res = requests.post(url, headers=headers, json={"ref": "main"})
         
         if res.status_code == 204:
-            return True, "🚀 起飞成功！Worker 正在 GitHub 后台启动。"
+            return True, "🚀 起飞成功！请稍后刷新观察兵蜂日志。"
         else:
-            return False, f"GitHub 拒绝访问 ({res.status_code}): {res.text}"
+            return False, f"GitHub 拒绝 ({res.status_code}): {res.text}"
     except Exception as e:
-        return False, f"系统错误: {str(e)}"
+        return False, f"本地异常: {str(e)}"
 
-# --- 市场时钟与指标逻辑 ---
+# --- 时钟与市场状态 ---
 def get_et_time():
     return datetime.now(pytz.timezone('US/Eastern'))
 
@@ -63,7 +64,7 @@ def get_market_active_hours(created_at_str):
     while curr < now_et:
         if curr.weekday() < 5:
             ot, ct = curr.replace(hour=9, minute=30, second=0), curr.replace(hour=16, minute=0, second=0)
-            if ot <= curr <= ct: active_hours += 0.5 # 30min步进
+            if ot <= curr <= ct: active_hours += 0.5
         curr += timedelta(minutes=30)
     return max(active_hours, 0.1)
 
@@ -79,7 +80,7 @@ def get_metrics(d):
     mdd_penalty = (mdd * 0.5 + 1) if d.get('focus') == 'option' else (mdd + 1)
     return active_age, roi, roi_hr, mdd, roi_hr / mdd_penalty
 
-# --- UI 界面 ---
+# --- 侧边栏 ---
 with st.sidebar:
     st.header("🕒 市场时钟 (美东)")
     m_status, m_icon = check_market_status()
@@ -94,16 +95,17 @@ with st.sidebar:
 tabs = st.tabs(["👑 蜂后赋能", "🏆 演化排行榜", "🧬 杂交实验室", "⚙️ 系统维护"])
 
 with tabs[0]:
-    instruction = st.text_area("孵化指令 (如：针对 FCX 孵化 3 只中立期权兵蜂):")
-    if st.button("开始专业孵化", type="primary"):
-        with st.spinner("蜂后正在分配专业策略基因..."):
-            prompt = f"你是蜂后。设计兵蜂。分配专业策略逻辑（如 Iron Condor）。返回 JSON 列表：[{{'name':'代号','focus':'option','portfolio':['代码'],'logic':'详细逻辑基因','persona':'策略名性格','balance':10000,'initial_balance':10000,'memory':'等待开盘'}}]。指令：{instruction}"
+    instruction = st.text_area("孵化指令 (例如：孵化3只盯FCX的中立兵蜂):")
+    if st.button("注入专业基因", type="primary"):
+        with st.spinner("蜂后正在分析策略库..."):
+            prompt = f"你是蜂后。设计兵蜂。分配专业期权策略逻辑（如Iron Condor）。返回纯JSON列表：[{{'name':'代号','focus':'option','portfolio':['代码'],'logic':'详细交易逻辑基因','persona':'策略名性格','balance':10000,'initial_balance':10000,'memory':'等待开盘。'}}]。指令：{instruction}"
             try:
                 res = queen_ai.generate_content(prompt)
-                for d in json.loads(res.text.strip().replace("```json", "").replace("```", "").strip()):
+                new_d = json.loads(res.text.strip().replace("```json", "").replace("```", "").strip())
+                for d in new_d:
                     d['peak_balance'] = d.get('balance', 10000.0)
                     supabase.table("drones").insert(d).execute()
-                st.success("基因注入成功！"); st.rerun()
+                st.success("基因已注入！"); st.rerun()
             except Exception as e: st.error(f"失败: {e}")
 
 with tabs[1]:
@@ -121,9 +123,9 @@ with tabs[1]:
             with st.expander(f"{icon} {d['name']} | 收益: {d['roi']:.2f}% | 活跃: {d['age_active']:.1f}h"):
                 c1, c2, c3 = st.columns(3)
                 c1.metric("现金", f"${d['balance']:,.0f}")
-                c2.write(f"**策略:** {d['persona']}")
+                c2.write(f"**策略形态:** {d['persona']}")
                 c3.write(f"**关注:** {d['portfolio']}")
-                st.info(f"**🧠 思考与自我复盘 (Memory):**\n{d.get('memory', '尚无记录')}")
+                st.info(f"**🧠 思考与复盘 (Memory):**\n{d.get('memory', '尚无记录')}")
                 if d.get('logs'): st.json(d['logs'])
                 if st.button(f"🗑️ 淘汰 {d['name']}", key=d['id']):
                     supabase.table("drones").delete().eq("id", d["id"]).execute(); st.rerun()
@@ -134,22 +136,22 @@ with tabs[1]:
         for d in nursery: draw_drone(d, "🐣"); st.progress(min(d['age_active']/4.0, 1.0))
 
 with tabs[2]:
-    st.subheader("🧬 遗传学杂交 (只传基因，不传记忆)")
+    st.subheader("🧬 遗传学杂交 (剥离后天记忆)")
     STABLE = 32.5 
     elites = [d for d in all_d if d['age_active'] >= STABLE and d['fitness'] > 0]
-    if len(elites) < 2: st.warning(f"目前没有满一周盘中时长 ({STABLE}h) 的精英。")
+    if len(elites) < 2: st.warning(f"目前没有存活满盘中一周 ({STABLE}h) 的精英。")
     else:
         col1, col2 = st.columns(2)
-        p1 = col1.selectbox("母本 A (Logic 供体)", elites, format_func=lambda x: x['name'])
-        p2 = col2.selectbox("母本 B (Persona 供体)", elites, format_func=lambda x: x['name'])
-        if st.button("🧬 执行基因融合", type="primary"):
+        p1 = col1.selectbox("母本 A (基因供体)", elites, format_func=lambda x: x['name'])
+        p2 = col2.selectbox("母本 B (性格供体)", elites, format_func=lambda x: x['name'])
+        if st.button("🧬 执行基因杂交", type="primary"):
             with st.spinner("正在提取遗传密码..."):
-                # 核心：只融合先天 Logic/Persona，不继承后天 Memory
-                prompt = f"杂交：融合 A 的逻辑 {p1['logic']} 和 B 的性格 {p2['persona']}。生成全新二代单位基因，不带任何 memory。返回 JSON。"
+                # 遗传学逻辑：仅提取 logic 和 persona，memory 设为初始值
+                prompt = f"杂交：融合 A 的逻辑 {p1['logic']} 和 B 的性格 {p2['persona']}。生成全新二代基因，严禁继承任何后天 memory。返回JSON。"
                 try:
                     res = queen_ai.generate_content(prompt)
                     child = json.loads(res.text.strip().replace("```json", "").replace("```", "").strip())
-                    supabase.table("drones").insert(child).execute(); st.success("二代单位已孵化！")
+                    supabase.table("drones").insert(child).execute(); st.success("二代精英诞诞生！")
                 except Exception as e: st.error(f"失败: {e}")
 
 with tabs[3]:

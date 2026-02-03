@@ -2,8 +2,8 @@ name: Hive Cycle - Patrol & Evolution
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # 改为每30分钟运行一次
-  workflow_dispatch: # 必须有这一行，按钮才有用
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   hive-engine:
