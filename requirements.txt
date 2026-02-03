@@ -1,6 +1,7 @@
 streamlit
 pandas
 supabase
-google-generativeai
+google-genai
 polygon-api-client
 pytz
+requests
