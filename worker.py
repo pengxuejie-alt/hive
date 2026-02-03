@@ -4,80 +4,65 @@ from polygon import RESTClient
 from supabase import create_client
 from datetime import datetime, timezone
 
-# --- 初始化 ---
-# 强制检查环境变量，如果缺失会在 GitHub Actions 日志里直接报错
-POLYGON_KEY = os.environ.get("POLYGON_KEY")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-GEMINI_KEY = os.environ.get("GEMINI_KEY")
-
-if not all([POLYGON_KEY, SUPABASE_URL, SUPABASE_KEY, GEMINI_KEY]):
-    print("❌ 错误: 环境变量配置不全，请检查 GitHub Secrets")
-    exit(1)
-
-client_poly = RESTClient(api_key=POLYGON_KEY)
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-genai.configure(api_key=GEMINI_KEY)
+# --- 初始化 (付费版 API) ---
+client_poly = RESTClient(api_key=os.environ.get("POLYGON_KEY"))
+supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+genai.configure(api_key=os.environ.get("GEMINI_KEY"))
 model = genai.GenerativeModel("gemini-3-flash-preview")
 
-def get_market_data(tickers):
-    context = {}
-    for t in tickers:
-        try:
-            # 付费版高级接口
-            snap = client_poly.get_snapshot_ticker("stocks", t)
-            price = snap.last_trade.p if snap.last_trade and snap.last_trade.p > 0 else snap.prev_day.c
-            chain = client_poly.list_snapshot_options_chain(t, params={"limit": 10})
-            options = [{"ticker": o.ticker, "price": o.last_trade.p, "type": o.details.contract_type} for o in chain]
-            context[t] = {"stock_price": price, "options": options}
-        except Exception as e:
-            print(f"⚠️ 扫描 {t} 异常: {e}")
-    return context
-
 def patrol_and_evolve():
-    print("🚀 开始全员巡检...")
+    # 获取所有工蜂
     res = supabase.table("drones").select("*").execute()
     drones = res.data
     
-    # 获取美东时间
     et_tz = pytz.timezone('US/Eastern')
     ts = datetime.now(et_tz).strftime("%m-%d %H:%M")
 
+    print(f"🚀 开始执行 Hive 巡检循环，共计 {len(drones)} 只工蜂...")
+
     for d in drones:
         try:
-            print(f"--- 🐝 正在处理工蜂: {d['name']} (ID: {d['id']}) ---")
-            m_data = get_market_data(d.get('portfolio', ['AMD']))
+            print(f"--- 🐝 正在处理: {d['name']} ---")
             
-            prompt = f"""你是 Hive 蜂巢工蜂 {d['name']}。性格: {d['persona']}。
-            当前余额: ${d['balance']} | 持仓: {d.get('positions')}
-            实时行情: {json.dumps(m_data)}
-            请分析并决策。返回纯JSON: {{'trades':[], 'thought':'', 'learning':''}}
-            """
-            
-            res_ai = model.generate_content(prompt).text.strip()
-            cmd = json.loads(res_ai.replace("```json", "").replace("```", "").strip())
-            
-            # 资产处理逻辑
-            new_bal = float(d['balance'])
+            # 1. 获取市场快照 (利用付费接口)
+            portfolio = d.get('portfolio', ['GLD'])
+            m_data = {}
+            for ticker in portfolio:
+                try:
+                    # 尝试从 ticker 中提取股票代码 (处理 O: 前缀)
+                    base_symbol = ticker.split(':')[1][:3] if "O:" in ticker else ticker
+                    snap = client_poly.get_snapshot_ticker("stocks", base_symbol)
+                    m_data[ticker] = {
+                        "price": snap.last_trade.p if snap.last_trade else snap.prev_day.c,
+                        "day_change": snap.todays_change_percent
+                    }
+                except: m_data[ticker] = "Data access error"
+
+            # 2. AI 决策过程
+            prompt = f"你是 Hive 工蜂 {d['name']}。性格: {d['persona']}。余额: {d['balance']}。行情: {m_data}。请决策并返回纯JSON: {{'trades':[], 'thought':'', 'learning':''}}"
+            ai_res = model.generate_content(prompt).text.strip()
+            cmd = json.loads(ai_res.replace("```json", "").replace("```", "").strip())
+
+            # 3. 计算资产变动 (组合交易支持)
+            new_bal = float(d.get('balance', 10000.0))
             new_pos = (d.get('positions', {}) or {}).copy()
-            trade_summaries = []
+            logs = []
 
             for t in cmd.get('trades', []):
-                symbol, qty, price = t['symbol'], t['qty'], t['price']
-                mult = 100 if "O:" in symbol else 1
-                cost = qty * price * mult
-                
+                sym, qty, px = t['symbol'], t['qty'], t['price']
+                mult = 100 if "O:" in sym else 1
+                cost = qty * px * mult
                 if t['action'] == 'BUY' and new_bal >= cost:
                     new_bal -= cost
-                    new_pos[symbol] = new_pos.get(symbol, 0) + qty
-                    trade_summaries.append(f"🟢买入 {symbol}")
-                elif t['action'] == 'SELL' and new_pos.get(symbol, 0) >= qty:
+                    new_pos[sym] = new_pos.get(sym, 0) + qty
+                    logs.append(f"🟢买入 {sym}")
+                elif t['action'] == 'SELL' and new_pos.get(sym, 0) >= qty:
                     new_bal += cost
-                    new_pos[symbol] -= qty
-                    if new_pos[symbol] <= 0: del new_pos[symbol]
-                    trade_summaries.append(f"🔴卖出 {symbol}")
+                    new_pos[sym] -= qty
+                    if new_pos[sym] <= 0: del new_pos[sym]
+                    trade_logs.append(f"🔴卖出 {sym}")
 
-            # 资产估值
+            # 4. 实时算账：同步 total_assets 字段
             mkt_val = 0.0
             for s, q in new_pos.items():
                 try:
@@ -85,29 +70,23 @@ def patrol_and_evolve():
                     mkt_val += q * p * (100 if "O:" in s else 1)
                 except: pass
 
-            # 强制日志字符串化，防止 JSON 解析错误
-            action_text = " | ".join(trade_summaries) if trade_summaries else "🟡巡检不动"
-            new_log_str = f"[{ts}] {action_text} | 🧠 {cmd['thought']}"
-            
-            # 准备写回数据库
+            # 5. 强制执行更新 (即使没有任何交易)
             update_payload = {
                 "balance": new_bal,
                 "positions": new_pos,
                 "total_assets": new_bal + mkt_val,
-                "logs": ([new_log_str] + (d.get('logs') or []))[:20],
-                "patrol_count": (int(d.get('patrol_count') or 0)) + 1, # 计数器递增
+                "logs": ([f"[{ts}] {' | '.join(logs) or '🟡保持不动'} | 🧠 {cmd['thought']}"] + (d.get('logs') or []))[:20],
+                "patrol_count": (d.get('patrol_count') or 0) + 1, # 确保计数器加1
                 "memory": cmd['learning']
             }
-            
-            # 执行更新
-            save_res = supabase.table("drones").update(update_payload).eq("id", d["id"]).execute()
-            if save_res.data:
-                print(f"✅ {d['name']} 更新成功，巡检次数: {update_payload['patrol_count']}")
-            else:
-                print(f"❌ {d['name']} 更新失败，请检查数据库")
+
+            # 关键：独立更新每一只工蜂，确保互不干扰
+            supabase.table("drones").update(update_payload).eq("id", d["id"]).execute()
+            print(f"✅ {d['name']} 巡检数据已同步，计数器: {update_payload['patrol_count']}")
 
         except Exception as e:
-            print(f"💥 {d['name']} 巡检崩溃: {e}")
+            print(f"❌ {d['name']} 巡检失败，原因: {e}")
+            continue # 跳过故障蜂，继续处理下一只
 
 if __name__ == "__main__":
     patrol_and_evolve()
