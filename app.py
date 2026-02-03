@@ -18,21 +18,26 @@ try:
 except Exception as e:
     st.error(f"连接失败: {e}"); st.stop()
 
-# --- 远程触发 GitHub Action ---
+# --- 远程触发 GitHub Action (修复 KeyError 并增加异常处理) ---
 def trigger_worker():
-    headers = {
-        "Authorization": f"token {st.secrets['GITHUB_TOKEN']}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    repo = st.secrets['GITHUB_REPO']
-    url = f"https://api.github.com/repos/{repo}/actions/workflows/hive_cycle.yml/dispatches"
-    data = {"ref": "main"}
     try:
+        # 必须在 Streamlit Secrets 中配置 GITHUB_TOKEN 和 GITHUB_REPO
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["GITHUB_REPO"]
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        # 确保 yml 文件名与仓库一致
+        url = f"https://api.github.com/repos/{repo}/actions/workflows/hive_cycle.yml/dispatches"
+        data = {"ref": "main"}
         res = requests.post(url, headers=headers, json=data)
         return res.status_code == 204
-    except: return False
+    except Exception as e:
+        st.error(f"调度器错误: 请确保 Secrets 中已配置 GITHUB_TOKEN 和 GITHUB_REPO。具体错误: {e}")
+        return False
 
-# --- 时间与市场状态逻辑 ---
+# --- 市场状态与时钟逻辑 ---
 def get_et_time():
     return datetime.now(pytz.timezone('US/Eastern'))
 
@@ -41,8 +46,8 @@ def check_market_status():
     if et_now.weekday() >= 5:
         return "休市 (周末)", "🔴"
     
-    open_time = et_now.replace(hour=9, minute=30, second=0)
-    close_time = et_now.replace(hour=16, minute=0, second=0)
+    open_time = et_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_time = et_now.replace(hour=16, minute=0, second=0, microsecond=0)
     
     if et_now < open_time:
         return "盘前 (Pre-market)", "🟡"
@@ -52,6 +57,7 @@ def check_market_status():
         return "盘中 (Live)", "🟢"
 
 def get_market_active_hours(created_at_str):
+    """计算美股盘中有效小时数"""
     et_tz = pytz.timezone('US/Eastern')
     if not created_at_str: return 0.1
     start_dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00')).astimezone(et_tz)
@@ -60,24 +66,30 @@ def get_market_active_hours(created_at_str):
     curr = start_dt
     while curr < now_et:
         if curr.weekday() < 5:
-            open_t = curr.replace(hour=9, minute=30, second=0)
-            close_t = curr.replace(hour=16, minute=0, second=0)
-            if open_t <= curr <= close_t: active_hours += 1.0
-        curr += timedelta(hours=1)
+            ot = curr.replace(hour=9, minute=30, second=0)
+            ct = curr.replace(hour=16, minute=0, second=0)
+            if ot <= curr <= ct: active_hours += 0.5 # 对应30min调度
+        curr += timedelta(minutes=30)
     return max(active_hours, 0.1)
 
 def get_metrics(d):
-    active_age, initial = get_market_active_hours(d.get('created_at')), float(d.get('initial_balance') or 10000.0)
+    """核心演化指标"""
+    age_active = get_market_active_hours(d.get('created_at'))
+    initial = float(d.get('initial_balance') or 10000.0)
     current = float(d.get('balance') or initial)
     peak = float(d.get('peak_balance') or initial)
+    
     roi = ((current - initial) / initial * 100) if initial > 0 else 0.0
-    roi_hr = roi / active_age
+    roi_hr = roi / age_active
+    
     try: mdd = max(0.0, (peak - current) / peak * 100) if peak > 0 else 0.0
     except: mdd = 0.0
+    
     mdd_penalty = (mdd * 0.5 + 1) if d.get('focus') == 'option' else (mdd + 1)
-    return active_age, roi, roi_hr, mdd, roi_hr / mdd_penalty
+    fitness = roi_hr / mdd_penalty
+    return age_active, roi, roi_hr, mdd, fitness
 
-# --- 侧边栏：状态显示 ---
+# --- 侧边栏 ---
 st.title("🐝 Hive 蜂巢：专业策略演化实验室")
 
 with st.sidebar:
@@ -87,26 +99,40 @@ with st.sidebar:
     st.write(f"当前时间: {get_et_time().strftime('%H:%M:%S')}")
     st.divider()
     st.header("🚀 调度控制")
-    if st.button("🔔 立即手动放飞所有蜜蜂"):
-        if trigger_worker(): st.success("指令已发出！")
-        else: st.error("请检查 Secrets 配置。")
+    if st.button("🔔 立即一次性放飞所有蜜蜂"):
+        if trigger_worker():
+            st.success("指令已发出！Worker 正在启动...")
+        else:
+            st.error("启动失败，请检查 Secrets 配置。")
 
-# --- Tabs 逻辑 (渲染细节) ---
 t1, t2, t3, t4 = st.tabs(["👑 蜂后赋能", "🏆 演化排行榜", "🧬 杂交实验室", "⚙️ 系统维护"])
 
 with t1:
-    instruction = st.text_area("蜂后指令 (例如：孵化3只盯NVDA的中立兵蜂):")
-    if st.button("开始孵化", type="primary"):
-        with st.spinner("蜂后注入基因中..."):
-            prompt = f"""你是蜂后。分配专业策略基因（如Iron Condor, Vertical Spread）。
-            返回JSON列表：[{{'name':'代号','type':'soldier','focus':'option','portfolio':['代码'],'logic':'专业策略逻辑','persona':'性格与策略名','balance':10000,'initial_balance':10000,'memory':'等待开盘'}}]
-            指令：{instruction}"""
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        instruction = st.text_area("蜂后指令:", placeholder="例如：孵化3只盯NVDA的中立兵蜂。")
+    with col2:
+        st.info("💡 **蜂后增强**：会自动分配 Iron Condor / Vertical Spread 等专业机构策略基因。")
+    
+    if st.button("开始专业孵化", type="primary"):
+        with st.spinner("蜂后正在分析全球金融策略库..."):
+            enhanced_prompt = f"""
+            你是蜂后。设计兵蜂单位。
+            请根据用户指令，从以下专业策略库中分配基因：
+            - 中立：Iron Condor, Delta Neutral, Butterfly Spread.
+            - 激进：Long Gamma, Directional Vertical Spread, Straddle.
+            - 保守：Covered Call, Cash-Secured Put, Credit Spread.
+            每只蜂必须具备独特的 logic，并在 persona 中体现其策略特质。
+            返回纯JSON列表：[{{'name':'代号','type':'soldier','focus':'option','portfolio':['代码'],'logic':'详细交易逻辑','persona':'策略名及性格','balance':10000,'initial_balance':10000,'memory':'初始经验'}}]
+            指令：{instruction}
+            """
             try:
-                res = queen_ai.generate_content(prompt)
-                for d in json.loads(res.text.strip().replace("```json", "").replace("```", "").strip()):
+                res = queen_ai.generate_content(enhanced_prompt)
+                new_drones = json.loads(res.text.strip().replace("```json", "").replace("```", "").strip())
+                for d in new_drones:
                     d['peak_balance'] = d.get('balance', 10000.0)
                     supabase.table("drones").insert(d).execute()
-                st.success("孵化成功。"); st.rerun()
+                st.success("专业兵蜂已就位。"); st.rerun()
             except Exception as e: st.error(f"失败: {e}")
 
 with t2:
@@ -121,45 +147,55 @@ with t2:
         mature = sorted([d for d in all_d if d['age_active'] >= 4], key=lambda x: x['fitness'], reverse=True)
         nursery = sorted([d for d in all_d if d['age_active'] < 4], key=lambda x: x['age_active'], reverse=True)
 
-        def show_drone(d, icon):
-            with st.expander(f"{icon} {d['name']} | 收益: {d['roi']:.2f}% | 活跃: {d['age_active']:.1f}h"):
+        def render_drone(d, icon):
+            with st.expander(f"{icon} {d['name']} | 收益: {d['roi']:.2f}% | 盘中活跃: {d['age_active']:.1f}h"):
                 c1, c2, c3 = st.columns(3)
-                c1.metric("现金", f"${d['balance']:,.0f}")
-                c2.write(f"**策略基因:** {d['persona']}")
-                c3.write(f"**关注:** {d['portfolio']}")
-                st.info(f"**🧠 思考与复盘:** {d.get('memory', '学习中...')}")
-                if d.get('logs'): st.json(d['logs'])
-                if st.button(f"🗑️ 淘汰 {d['name']}", key=d['id']):
+                c1.metric("余额", f"${d['balance']:,.0f}")
+                c2.metric("ROI/hr", f"{d['roi_hr']:.2f}%")
+                c3.write(f"**策略形态:** {d['persona']}")
+                
+                st.write("**🧬 基因逻辑:**")
+                st.caption(d['logic'])
+                
+                st.write("**🧠 思考过程与最新复盘:**")
+                st.info(d.get('memory', '尚无记忆记录'))
+                
+                if d.get('logs'):
+                    st.write("**📜 交易明细:**")
+                    st.json(d['logs'])
+                
+                if st.button(f"🗑️ 淘汰 {d['name']}", key=f"del_{d['id']}"):
                     supabase.table("drones").delete().eq("id", d["id"]).execute()
                     st.rerun()
 
-        st.subheader("🏁 正式赛场")
+        st.subheader("🏁 正式赛场 (>4h 盘中)")
         for idx, d in enumerate(mature):
-            show_drone(d, "🥇" if idx==0 else "🥈" if idx==1 else "🥉" if idx==2 else "🐝")
+            render_drone(d, "🥇" if idx==0 else "🥈" if idx==1 else "🥉" if idx==2 else "🐝")
         st.divider()
-        st.subheader("🍼 观察室")
+        st.subheader("🍼 孵化观察室")
         for d in nursery:
-            show_drone(d, "🐣")
+            render_drone(d, "🐣")
             st.progress(min(d['age_active']/4.0, 1.0))
 
 with t3:
-    st.subheader("🧬 杂交实验室")
-    STABLE = 32.5 # 1周活跃时长
+    st.subheader("🧬 精英基因杂交")
+    STABLE = 32.5 # 一周盘中时长
     elites = [d for d in all_d if d['age_active'] >= STABLE and d['fitness'] > 0]
     if len(elites) < 2:
-        st.warning(f"目前还没有存活满一周盘中时间（{STABLE}h）的精英。")
+        st.warning(f"目前跨周精英不足 ({STABLE}h)。")
     else:
+        st.success(f"发现 {len(elites)} 只优良种蜂。")
         col1, col2 = st.columns(2)
         p1 = col1.selectbox("母本 A (Logic)", elites, format_func=lambda x: x['name'])
         p2 = col2.selectbox("母本 B (Persona)", elites, format_func=lambda x: x['name'])
-        if st.button("🧬 执行基因融合", type="primary"):
-            with st.spinner("融合中..."):
-                cross_prompt = f"杂交单位。提取 A 的 Logic: {p1['logic']} 和 B 的 Persona: {p2['persona']}。忽略后天memory，生成全新基因。返回纯JSON。"
+        if st.button("🧬 执行基因杂交", type="primary"):
+            with st.spinner("正在提取遗传密码..."):
+                cross_prompt = f"杂交。提取 A 的 Logic: {p1['logic']} 和 B 的 Persona: {p2['persona']}。忽略后天记忆，生成全新基因。返回纯JSON。"
                 try:
                     res = queen_ai.generate_content(cross_prompt)
                     child = json.loads(res.text.strip().replace("```json", "").replace("```", "").strip())
                     supabase.table("drones").insert(child).execute()
-                    st.success("二代精英诞生！")
+                    st.success("二代精英已诞生。")
                 except Exception as e: st.error(f"失败: {e}")
 
 with t4:
