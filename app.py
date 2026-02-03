@@ -3,61 +3,143 @@ import pandas as pd
 from supabase import create_client
 import google.generativeai as genai
 import json
-from datetime import datetime
+import requests
+from datetime import datetime, timezone, timedelta
 import pytz
 from polygon import RESTClient
 
-# --- 核心初始化 ---
-supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-poly_client = RESTClient(api_key=st.secrets["POLYGON_KEY"])
+# --- 核心配置 ---
+AI_MODEL_NAME = "gemini-3-flash-preview"
+st.set_page_config(page_title="Hive | 虎之眼演化实验室", layout="wide", page_icon="🐝")
 
-def draw_drone_card(d, icon):
-    """渲染单只蜜蜂卡片并包含‘单体修复’按钮"""
-    with st.expander(f"{icon} {d['name']} | 资产: ${d['total_assets']:,.2f}"):
-        st.write(f"**🧠 经验记录:** {d.get('memory', '学习中...')}")
-        
-        c1, c2 = st.columns(2)
-        # 单体重置按钮
-        if c1.button(f"🩹 修复该蜂账本", key=f"reset_{d['id']}"):
-            supabase.table("drones").update({
-                "balance": 10000.0, 
-                "positions": {}, 
-                "peak_balance": 10000.0
-            }).eq("id", d["id"]).execute()
-            st.success(f"{d['name']} 已重置！")
-            st.rerun()
-        
-        if c2.button(f"🗑️ 淘汰", key=f"del_{d['id']}"):
-            supabase.table("drones").delete().eq("id", d["id"]).execute()
-            st.rerun()
+try:
+    supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    genai.configure(api_key=st.secrets["GEMINI_KEY"])
+    queen_ai = genai.GenerativeModel(AI_MODEL_NAME)
+    poly_client = RESTClient(api_key=st.secrets["POLYGON_KEY"])
+except Exception as e:
+    st.error(f"连接失败: {e}"); st.stop()
 
-# --- 主界面 ---
-st.title("🐝 Hive 蜂巢管理后台")
-tabs = st.tabs(["🏆 演化排行榜", "⚙️ 系统维护"])
+# --- 远程触发 GitHub Action ---
+def trigger_worker():
+    try:
+        token = st.secrets["GITHUB_TOKEN"].strip()
+        repo = st.secrets["GITHUB_REPO"].strip()
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        url = f"https://api.github.com/repos/{repo}/actions/workflows/hive_cycle.yml/dispatches"
+        res = requests.post(url, headers=headers, json={"ref": "main"})
+        return res.status_code == 204
+    except: return False
 
-with tabs[0]:
-    # 此处省略数据获取逻辑，调用 draw_drone_card(d, icon)
-    st.write("展示蜜蜂列表...")
-
-with tabs[1]:
-    st.header("🛠️ 全局管理")
-    
-    # --- 核心功能：全体一键重置 ---
-    st.warning("此操作将重置所有兵蜂的金额为 $10,000，清空所有持仓，但会保留它们的 Memory (记忆)。")
-    if st.button("🩹 一键重置全体账本 (保留记忆)", type="primary"):
+# --- 资产实时估值逻辑 ---
+def get_live_asset_value(positions):
+    total_mkt_val = 0.0
+    details = []
+    if not positions: return 0.0, []
+    for symbol, qty in positions.items():
         try:
-            # neq("id", -1) 是为了匹配所有有效 ID 的通用写法
-            supabase.table("drones").update({
-                "balance": 10000.0,
-                "positions": {},
-                "peak_balance": 10000.0
-            }).neq("id", -1).execute()
-            st.success("全体账本已完成一键修复！")
-            st.rerun()
-        except Exception as e:
-            st.error(f"重置失败: {e}")
+            if symbol.startswith("O:"):
+                px = poly_client.get_last_trade(symbol).price
+                mv = float(qty) * float(px) * 100 
+            else:
+                px = poly_client.get_snapshot_ticker("stocks", symbol).last_trade.p
+                mv = float(qty) * float(px)
+            total_mkt_val += mv
+            details.append({"标的": symbol, "数量": qty, "现价": f"${px:.2f}", "市值": f"${mv:.2f}"})
+        except:
+            details.append({"标的": symbol, "数量": qty, "现价": "代码无效", "市值": "0.0"})
+    return total_mkt_val, details
 
+def get_market_active_hours(created_at_str):
+    et_tz = pytz.timezone('US/Eastern')
+    if not created_at_str: return 0.1
+    start_dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00')).astimezone(et_tz)
+    now_et = datetime.now(et_tz)
+    active_hours = 0.0
+    curr = start_dt
+    while curr < now_et:
+        if curr.weekday() < 5:
+            ot, ct = curr.replace(hour=9, minute=30, second=0), curr.replace(hour=16, minute=0, second=0)
+            if ot <= curr <= ct: active_hours += 0.5
+        curr += timedelta(minutes=30)
+    return max(active_hours, 0.1)
+
+# --- UI 侧边栏 ---
+with st.sidebar:
+    st.header("🕒 虎之眼控制台")
+    et_now = datetime.now(pytz.timezone('US/Eastern'))
+    st.write(f"美东时间: {et_now.strftime('%H:%M:%S')}")
+    if st.button("🚀 立即放飞巡检"):
+        if trigger_worker(): st.success("指令已送达 GitHub！")
+        else: st.error("放飞失败，请检查 Secret。")
     st.divider()
-    if st.button("🔥 全体大灭绝 (清空数据库)"):
+
+# --- 主页面 Tabs ---
+tabs = st.tabs(["🏆 蜂群实战列表", "👑 蜂后孵化", "⚙️ 系统维护"])
+
+# --- Tab 1: 蜂群实战列表 (含单体修复按钮) ---
+with tabs[0]:
+    res = supabase.table("drones").select("*").execute()
+    if not res.data:
+        st.info("目前蜂巢空空如也，请去‘蜂后孵化’标签页注入基因。")
+    else:
+        all_d = []
+        for d in res.data:
+            age = get_market_active_hours(d.get('created_at'))
+            cash = float(d.get('balance') or 0)
+            mkt_val, pos_details = get_live_asset_value(d.get('positions', {}))
+            total_assets = cash + mkt_val
+            initial = float(d.get('initial_balance') or 10000)
+            roi = ((total_assets - initial) / initial * 100)
+            peak = max(float(d.get('peak_balance') or 0), total_assets)
+            mdd = max(0.0, (peak - total_assets) / peak * 100) if peak > 0 else 0
+            d.update({'age_active': age, 'roi': roi, 'total_assets': total_assets, 'mkt_val': mkt_val, 'pos_details': pos_details, 'mdd': mdd})
+            all_d.append(d)
+
+        for d in sorted(all_d, key=lambda x: x['roi'], reverse=True):
+            with st.expander(f"🐝 {d['name']} | 总资产: ${d['total_assets']:,.2f} | 收益: {d['roi']:.2f}%"):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("现金", f"${d['balance']:,.0f}")
+                c2.metric("持仓市值", f"${d['mkt_val']:,.2f}")
+                c3.metric("最大回撤", f"{d['mdd']:.2f}%")
+                
+                if d['pos_details']: st.table(pd.DataFrame(d['pos_details']))
+                st.info(f"**🧠 经验记录:** {d.get('memory', '学习中...')}")
+                
+                # --- 操作区 ---
+                sc1, sc2, sc3 = st.columns(3)
+                if sc1.button("🩹 修复此蜂账本", key=f"reset_{d['id']}"):
+                    supabase.table("drones").update({"balance":10000.0, "positions":{}, "peak_balance":10000.0}).eq("id", d["id"]).execute()
+                    st.rerun()
+                if sc2.button("🗑️ 淘汰", key=f"del_{d['id']}"):
+                    supabase.table("drones").delete().eq("id", d["id"]).execute(); st.rerun()
+                if sc3.button("📜 日志", key=f"log_{d['id']}"):
+                    st.json(d.get('logs', []))
+
+# --- Tab 2: 蜂后孵化 ---
+with tabs[1]:
+    st.subheader("👑 蜂后基因注入")
+    instruction = st.text_area("孵化指令 (例如：孵化3只针对 INTC 的中立期权策略兵蜂):", height=150)
+    if st.button("注入基因并孵化", type="primary"):
+        with st.spinner("蜂后正在编码中..."):
+            prompt = f"你是蜂后。设计兵蜂单位。返回纯JSON列表：[{{'name':'代号','focus':'option','portfolio':['代码'],'logic':'策略逻辑','persona':'性格','balance':10000,'initial_balance':10000,'memory':'等待开盘'}}]。指令：{instruction}"
+            res = queen_ai.generate_content(prompt)
+            new_drones = json.loads(res.text.strip().replace("```json", "").replace("```", "").strip())
+            for d in new_drones:
+                d['peak_balance'] = 10000.0
+                supabase.table("drones").insert(d).execute()
+            st.success("孵化成功！")
+            st.rerun()
+
+# --- Tab 3: 系统维护 ---
+with tabs[2]:
+    st.header("⚙️ 蜂巢深度维护")
+    st.warning("一键重置将恢复所有兵蜂现金到 $10,000 并清空持仓，但保留 Memory。")
+    if st.button("🩹 一键修复全体账本 (保留记忆)", type="primary"):
+        supabase.table("drones").update({"balance": 10000.0, "positions": {}, "peak_balance": 10000.0}).neq("id", -1).execute()
+        st.success("全体账本已校准！")
+        st.rerun()
+    st.divider()
+    if st.button("🔥 全体大灭绝 (数据清零)"):
         supabase.table("drones").delete().neq("id", -1).execute()
         st.rerun()
