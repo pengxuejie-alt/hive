@@ -75,7 +75,7 @@ def patrol_and_evolve():
             【交易协议强制约束】:
             - 股票/ETF: 使用简洁代码 (如 'FCX', 'TSLA')。
             - 期权: 必须使用 Polygon 标准格式 'O:SYMBOLYYMMDD[C/P]行权价' (例如 'O:FCX260116C00050000')。
-            - 严禁在 symbol 字段写入任何描述性文字（如 'Collar Strategy'），否则将导致系统崩溃。
+            - 严禁在 symbol 字段写入任何描述性文字（如 'Collar Strategy'），否则将导致系统计算错误。
             
             返回纯JSON: 
             {{
@@ -98,7 +98,8 @@ def patrol_and_evolve():
             
             # 5. 更新账本逻辑
             update = {}
-            # 日志：记录思考过程 (logs 为自定义 JSON 字段)
+            
+            # 日志记录：保存思考过程
             new_log = {
                 "time": datetime.now().strftime("%m-%d %H:%M"), 
                 "thought": cmd['reason'], 
@@ -107,7 +108,7 @@ def patrol_and_evolve():
             }
             update['logs'] = ([new_log] + (d.get('logs') or []))[:10]
             
-            # 执行模拟交易 (仅限 BUY，SELL 逻辑可根据需要扩展)
+            # 执行模拟交易
             if cmd['action'] == 'BUY':
                 cost = cmd['qty'] * cmd['price']
                 if d['balance'] >= cost:
@@ -117,6 +118,7 @@ def patrol_and_evolve():
                     update['positions'] = pos
 
             # 6. 记忆迭代：将复盘心得写入 memory
+            # 注意：杂交时应清空此处，仅保留此处产生的“后天复盘”
             update['memory'] = f"最新记录：{cmd['learning']}"
             
             # 计算总资产与峰值 (用于回撤计算)
