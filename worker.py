@@ -16,22 +16,21 @@ def get_market_data(tickers):
             lt = client_poly.get_last_trade(t)
             price = lt.price if lt and lt.price > 0 else client_poly.get_snapshot_ticker("stocks", t).prev_day.c
             chain = client_poly.list_snapshot_options_chain(t, params={"limit": 10})
-            opts = [{"ticker": o.ticker, "price": o.last_trade.p, "vol": o.day.v} for o in chain if getattr(o.day, 'v', 0) > 0]
+            opts = [{"ticker": o.ticker, "price": o.last_trade.p} for o in chain if getattr(o.day, 'v', 0) > 0]
             context[t] = {"price": price, "options": opts}
         except: pass
     return context
 
 def patrol_and_evolve():
-    drones = supabase.table("drones").select("*").execute().data
+    d_res = supabase.table("drones").select("*").execute()
+    drones = d_res.data
     ts = datetime.now(pytz.timezone('US/Eastern')).strftime("%H:%M:%S")
 
     for d in drones:
         try:
             print("--- 🐝 巡检: {} ---".format(d['name']))
             m_data = get_market_data(d.get('portfolio', ['GLD']))
-            prompt = "你是工蜂{}。性格:{}。余额:{}。行情:{}。决策交易返回JSON: {{'trades':[], 'thought':'', 'learning':''}}".format(
-                d['name'], d['persona'], d['balance'], json.dumps(m_data)
-            )
+            prompt = "工蜂{}。余额:{}。行情:{}。决策JSON: {{'trades':[], 'thought':'', 'learning':''}}".format(d['name'], d['balance'], json.dumps(m_data))
             
             res = gen_client.models.generate_content(model=MODEL_ID, contents=prompt, config={'response_mime_type': 'application/json'})
             cmd = json.loads(res.text)

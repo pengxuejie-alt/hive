@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from google import genai
 from polygon import RESTClient
 
-# --- 1. 初始化 ---
+# --- 1. 基础配置 ---
 st.set_page_config(page_title="Hive 蜂巢控制台", layout="wide", page_icon="🐝")
 
 try:
@@ -17,7 +17,7 @@ except Exception as e:
     st.error(f"启动失败: {e}")
     st.stop()
 
-# --- 2. 核心函数 ---
+# --- 2. 功能函数 ---
 def trigger_action():
     try:
         token, repo = st.secrets["GITHUB_TOKEN"].strip(), st.secrets["GITHUB_REPO"].strip()
@@ -40,7 +40,7 @@ def get_live_valuation(positions):
         except: details.append({"代码": k, "仓位": v, "市值": "获取中"})
     return mv, details
 
-# --- 3. 侧边栏交互 ---
+# --- 3. 侧边栏 ---
 with st.sidebar:
     st.title("🐝 Hive 蜂巢")
     if "is_flying" not in st.session_state: st.session_state.is_flying = False
@@ -50,7 +50,7 @@ with st.sidebar:
             st.session_state.is_flying = True
             bar = st.progress(0)
             status = st.empty()
-            msg = ["📦 准备环境...", "📡 扫描行情...", "🧠 演化决策...", "💾 同步资产...", "✅ 完成！"]
+            msg = ["📦 环境准备中...", "📡 扫描盘中行情...", "🧠 正在演化决策...", "💾 同步资产账本...", "✅ 巡检完成！"]
             for i in range(100):
                 time.sleep(0.35) 
                 bar.progress(i + 1)
@@ -63,13 +63,22 @@ with st.sidebar:
 t1, t2, t3 = st.tabs(["🏆 工蜂列表", "👑 蜂后孵化", "⚙️ 系统管理"])
 
 with t1:
-    res = supabase.table("drones").select("*").order("created_at", descending=True).execute()
-    if res.data:
-        for d in res.data:
+    # 修复核心：调整 order 的位置和调用方式
+    try:
+        query = supabase.table("drones").select("*")
+        # 确保 created_at 存在，如果报错则不排序
+        res = query.order("created_at", desc=True).execute()
+        data = res.data
+    except:
+        res = supabase.table("drones").select("*").execute()
+        data = res.data
+
+    if data:
+        for d in data:
             db_assets = d.get('total_assets', 10000.0)
             with st.expander(f"🐝 {d['name']} | 总资产: ${db_assets:,.2f} | 巡检: {d.get('patrol_count', 0)}"):
                 live_mv, pos_list = get_live_valuation(d.get('positions', {}))
-                st.metric("现金", f"${d['balance']:,.2f}", delta=f"持仓: ${live_mv:,.2f}")
+                st.metric("现金", f"${d['balance']:,.2f}", delta=f"实时市值: ${live_mv:,.2f}")
                 if pos_list: st.table(pd.DataFrame(pos_list))
                 for log in (d.get('logs', []) or [])[:5]:
                     if "🟢" in str(log): st.success(log)
@@ -88,6 +97,7 @@ with t2:
 
 with t3:
     if st.button("🔥 全量清空蜂巢", type="primary"):
-        supabase.table("drones").delete().neq("id", -1).execute()
+        # 修复：neq 条件必须匹配字段类型
+        supabase.table("drones").delete().neq("name", "RESERVED_VOID_NAME").execute()
         st.cache_data.clear()
         st.rerun()
