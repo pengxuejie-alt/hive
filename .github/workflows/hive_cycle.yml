@@ -2,9 +2,9 @@ name: Hive Cycle - Patrol & Evolution
 
 on:
   schedule:
-    # 每 30 分钟整点运行一次 (UTC时间)
+    # 调整为每 30 分钟运行一次
     - cron: '*/30 * * * *'
-  # 必须开启 workflow_dispatch 以支持 app.py 远程触发
+  # 必须保留，用于从 Streamlit 手动“放飞”
   workflow_dispatch:
 
 jobs:
