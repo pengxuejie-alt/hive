@@ -23,11 +23,19 @@ def patrol_and_evolve():
     drones = supabase.table("drones").select("*").execute().data
     for d in drones:
         try:
-            print(f"--- {d['name']} 巡检开始 ---")
-            m_data = {} # 这里补充 fetch_data 逻辑
+            print(f"--- {d['name']} 巡检 ---")
+            m_data = {} # fetch_data 逻辑
             
-            restriction = "" if market_open else "【非交易时段：仅限观察与 HOLD】"
-            prompt = f"你是兵蜂 {d['name']}。{restriction} 历史经验: {d.get('memory')}。行情: {m_data}。输出纯JSON: {{'action':'BUY/SELL/HOLD', 'symbol':'...', 'qty':0, 'price':0, 'reason':'...', 'learning':'心得'}}"
+            restriction = "" if market_open else "【非交易时段：仅限观察】"
+            # 强化兵蜂复盘意识
+            prompt = f"""你是兵蜂 {d['name']}。
+            你的基因策略：{d['logic']} ({d['persona']})
+            你的往期教训：{d.get('memory')}
+            行情：{m_data} | 余额：${d['balance']}
+            任务：
+            1. 决定 [BUY/SELL/HOLD]。
+            2. 对本次决策进行自我复盘，总结得失。
+            返回JSON：{{"action":"BUY/SELL/HOLD","symbol":"...","qty":0,"price":0,"reason":"决策理由","learning":"自我复盘心得"}}"""
             
             res = model.generate_content(prompt).text.strip()
             cmd = json.loads(res.replace("```json", "").replace("```", "").strip())
@@ -44,15 +52,14 @@ def patrol_and_evolve():
                     pos[cmd['symbol']] = pos.get(cmd['symbol'], 0) + cmd['qty']
                     update['positions'] = pos
             
-            # 记录经验与峰值，确保没有 None
-            update['memory'] = f"最新记录：{cmd['learning']}"
+            # 记忆迭代：将新学习的心得存入 memory
+            update['memory'] = f"经验迭代：{cmd['learning']}"
             current_bal = float(update.get('balance', d['balance']))
             update['peak_balance'] = max(float(d.get('peak_balance') or 0), current_bal, 1.0)
             
             supabase.table("drones").update(update).eq("id", d["id"]).execute()
-            print(f"✅ {d['name']} 完成")
-        except Exception as e: 
-            print(f"❌ {d['name']} 异常: {e}")
+            print(f"✅ {d['name']} 复盘完成")
+        except Exception as e: print(f"❌ {d['name']} 异常: {e}")
 
 if __name__ == "__main__":
     patrol_and_evolve()

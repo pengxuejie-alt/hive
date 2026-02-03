@@ -2,32 +2,27 @@ name: Hive Cycle - Patrol & Evolution
 
 on:
   schedule:
-    # 每小时整点运行一次 (UTC时间)
-    - cron: '0 * * * *'
-  # 允许在 GitHub Action 页面手动点击 "Run workflow" 触发
+    # 每 30 分钟整点运行一次 (UTC时间)
+    - cron: '*/30 * * * *'
+  # 必须开启 workflow_dispatch 以支持 app.py 远程触发
   workflow_dispatch:
 
 jobs:
   hive-engine:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
       - name: Execute Hive Worker
         env:
-          # 必须与你在 GitHub Secrets 中设置的名称一致
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
