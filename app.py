@@ -10,18 +10,17 @@ from polygon import RESTClient
 
 # --- 核心配置 ---
 AI_MODEL_NAME = "gemini-3-flash-preview"
-st.set_page_config(page_title="Hive | 蜂巢演化实验室", layout="wide", page_icon="🐝")
+st.set_page_config(page_title="Hive | 虎之眼演化实验室", layout="wide", page_icon="🐝")
 
 try:
     supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
     queen_ai = genai.GenerativeModel(AI_MODEL_NAME)
-    # 前端也需要 Polygon 权限来计算实时市值
     poly_client = RESTClient(api_key=st.secrets["POLYGON_KEY"])
 except Exception as e:
     st.error(f"连接失败: {e}"); st.stop()
 
-# --- 远程放飞逻辑 (经典 Token 认证) ---
+# --- 远程触发逻辑 ---
 def trigger_worker():
     try:
         token = st.secrets["GITHUB_TOKEN"].strip()
@@ -32,39 +31,27 @@ def trigger_worker():
         return res.status_code == 204
     except: return False
 
-# --- 资产估值逻辑 ---
-def get_live_asset_value(positions, current_cash):
-    """计算持仓总市值"""
-    total_market_value = 0.0
+# --- 资产实时估值逻辑 ---
+def get_live_asset_value(positions):
+    total_mkt_val = 0.0
     details = []
-    if not positions:
-        return 0.0, []
-        
+    if not positions: return 0.0, []
+    
     for symbol, qty in positions.items():
         try:
-            # 判断是股票还是期权
-            if "O:" in symbol or len(symbol) > 10: # 简单的期权识别
+            # 识别期权 (格式如 O:FCX260116C00050000)
+            if symbol.startswith("O:"):
                 px = poly_client.get_last_trade(symbol).price
+                mv = float(qty) * float(px) * 100 # 期权张数 * 价格 * 100
             else:
                 px = poly_client.get_snapshot_ticker("stocks", symbol).last_trade.p
+                mv = float(qty) * float(px)
             
-            mv = float(qty) * float(px)
-            total_market_value += mv
+            total_mkt_val += mv
             details.append({"标的": symbol, "数量": qty, "现价": f"${px:.2f}", "市值": f"${mv:.2f}"})
         except:
-            details.append({"标的": symbol, "数量": qty, "现价": "数据获取中", "市值": "0.0"})
-            
-    return total_market_value, details
-
-def get_et_time(): return datetime.now(pytz.timezone('US/Eastern'))
-
-def check_market_status():
-    et_now = get_et_time()
-    if et_now.weekday() >= 5: return "休市 (周末)", "🔴"
-    open_t, close_t = et_now.replace(hour=9, minute=30, second=0), et_now.replace(hour=16, minute=0, second=0)
-    if et_now < open_t: return "盘前", "🟡"
-    elif et_now > close_t: return "盘后", "🟠"
-    else: return "盘中", "🟢"
+            details.append({"标的": symbol, "数量": qty, "现价": "代码无效", "市值": "0.0"})
+    return total_mkt_val, details
 
 def get_market_active_hours(created_at_str):
     et_tz = pytz.timezone('US/Eastern')
@@ -80,72 +67,71 @@ def get_market_active_hours(created_at_str):
         curr += timedelta(minutes=30)
     return max(active_hours, 0.1)
 
-# --- UI 展示 ---
-st.title("🐝 Hive 蜂巢：资产实战看板")
+# --- 界面 ---
+st.title("🐝 Hive 蜂巢：虎之眼演化实验室")
 
 with st.sidebar:
-    st.header("🕒 市场状态")
-    m_status, m_icon = check_market_status()
-    st.subheader(f"{m_icon} {m_status}")
-    st.write(f"ET: {get_et_time().strftime('%H:%M:%S')}")
-    st.divider()
-    if st.button("🚀 手动放飞所有蜜蜂"):
+    et_now = datetime.now(pytz.timezone('US/Eastern'))
+    st.header(f"🕒 ET: {et_now.strftime('%H:%M:%S')}")
+    if st.button("🚀 立即放飞所有蜜蜂"):
         if trigger_worker(): st.success("已起飞！")
-        else: st.error("起飞失败，检查 Secrets。")
+        else: st.error("放飞失败")
 
 tabs = st.tabs(["👑 蜂后赋能", "🏆 演化排行榜", "🧬 杂交实验室", "⚙️ 系统维护"])
 
-# ... t1 孵化逻辑保持不变 ...
+# --- Tab 0: 孵化 ---
+with tabs[0]:
+    instruction = st.text_area("蜂后指令 (注入专业基因):")
+    if st.button("执行孵化", type="primary"):
+        with st.spinner("蜂后编码中..."):
+            prompt = f"设计兵蜂。分配专业期权策略逻辑。返回JSON列表：[{{'name':'代号','focus':'option','portfolio':['代码'],'logic':'逻辑基因','persona':'性格','balance':10000,'initial_balance':10000,'memory':'等待开盘'}}]。指令：{instruction}"
+            res = queen_ai.generate_content(prompt)
+            for d in json.loads(res.text.strip().replace("```json", "").replace("```", "").strip()):
+                d['peak_balance'] = d.get('balance', 10000.0)
+                supabase.table("drones").insert(d).execute()
+            st.rerun()
 
+# --- Tab 1: 排行榜 (含单体修复) ---
 with tabs[1]:
     res = supabase.table("drones").select("*").execute()
     if res.data:
         all_d = []
         for d in res.data:
             age = get_market_active_hours(d.get('created_at'))
-            cash = float(d.get('balance') or 0.0)
-            # 关键：计算实时资产
-            mkt_val, pos_details = get_live_asset_value(d.get('positions', {}), cash)
+            cash = float(d.get('balance') or 0)
+            mkt_val, pos_details = get_live_asset_value(d.get('positions', {}))
             total_assets = cash + mkt_val
-            
-            initial = float(d.get('initial_balance') or 10000.0)
+            initial = float(d.get('initial_balance') or 10000)
             roi = ((total_assets - initial) / initial * 100)
-            roi_hr = roi / age
-            
-            # 更新峰值资产以便计算回撤
             peak = max(float(d.get('peak_balance') or 0), total_assets)
             mdd = max(0.0, (peak - total_assets) / peak * 100) if peak > 0 else 0
             
-            d.update({
-                'age_active': age, 'roi': roi, 'roi_hr': roi_hr, 
-                'total_assets': total_assets, 'mkt_val': mkt_val,
-                'pos_details': pos_details, 'mdd': mdd, 'fitness': roi_hr / (mdd + 1)
-            })
+            d.update({'age_active': age, 'roi': roi, 'total_assets': total_assets, 
+                      'mkt_val': mkt_val, 'pos_details': pos_details, 'mdd': mdd, 'fitness': (roi/age) / (mdd + 1)})
             all_d.append(d)
 
-        def draw_drone_card(d, icon):
-            with st.expander(f"{icon} {d['name']} | 总资产: ${d['total_assets']:,.2f} | 收益: {d['roi']:.2f}%"):
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("现金可用", f"${d['balance']:,.0f}")
-                col_b.metric("持仓市值", f"${d['mkt_val']:,.2f}")
-                col_c.metric("最大回撤", f"{d['mdd']:.2f}%")
+        for d in sorted(all_d, key=lambda x: x['fitness'], reverse=True):
+            with st.expander(f"🐝 {d['name']} | 资产: ${d['total_assets']:,.2f} | ROI: {d['roi']:.2f}%"):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("现金", f"${d['balance']:,.0f}")
+                c2.metric("持仓市值", f"${d['mkt_val']:,.2f}")
+                c3.metric("最大回撤", f"{d['mdd']:.2f}%")
                 
-                if d['pos_details']:
-                    st.write("**📦 当前持仓明细:**")
-                    st.table(pd.DataFrame(d['pos_details']))
-                else:
-                    st.write("目前处于空仓观望状态。")
+                if d['pos_details']: st.table(pd.DataFrame(d['pos_details']))
+                st.info(f"**🧠 经验记录:** {d.get('memory')}")
                 
-                st.info(f"**🧠 思考复盘:** {d.get('memory')}")
-                if d.get('logs'): st.json(d['logs'])
-                
-                if st.button(f"🗑️ 淘汰 {d['name']}", key=d['id']):
+                # 手术区
+                sc1, sc2, sc3 = st.columns(3)
+                if sc1.button("🩹 单独重置账本", key=f"fix_{d['id']}"):
+                    supabase.table("drones").update({"balance": 10000.0, "positions": {}, "peak_balance": 10000.0}).eq("id", d["id"]).execute()
+                    st.success(f"{d['name']} 账本已重置，记忆已保留！"); st.rerun()
+                if sc2.button("🗑️ 淘汰", key=f"del_{d['id']}"):
                     supabase.table("drones").delete().eq("id", d["id"]).execute(); st.rerun()
+                if sc3.button("📜 日志", key=f"log_{d['id']}"):
+                    st.json(d.get('logs', []))
 
-        mature = sorted([d for d in all_d if d['age_active'] >= 4], key=lambda x: x['fitness'], reverse=True)
-        nursery = sorted([d for d in all_d if d['age_active'] < 4], key=lambda x: x['age_active'], reverse=True)
-
-        st.subheader("🏁 正式赛场")
-        for idx, d in enumerate(mature): draw_drone_card(d, "🥇" if idx==0 else "🥈" if idx==1 else "🥉" if idx==2 else "🐝")
-        st.divider(); st.subheader("🍼 观察室")
-        for d in nursery: draw_drone_card(d, "🐣"); st.progress(min(d['age_active']/4.0, 1.0))
+# --- Tab 3: 系统维护 ---
+with tabs[3]:
+    if st.button("🩹 全体账本无损重置"):
+        supabase.table("drones").update({"balance": 10000.0, "positions": {}, "peak_balance": 10000.0}).neq("id", -1).execute()
+        st.success("全体修正完成！"); st.rerun()
