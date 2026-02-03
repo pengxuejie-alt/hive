@@ -8,64 +8,75 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
     sys.stdout.flush()
 
-log("🚀 极速兼容引擎启动 (Fix: Sort Parameter)...")
+log("🚀 属性精确定位引擎启动 (Fix: details.ticker)...")
 
 try:
     client_poly = RESTClient(api_key=os.environ.get("POLYGON_KEY"))
     supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
     gen_client = genai.Client(api_key=os.environ.get("GEMINI_KEY"))
     MODEL_ID = "gemini-3-flash-preview"
-    log("✅ 客户端初始化就绪")
+    log("✅ API 客户端就绪")
 except Exception as e:
     log(f"❌ 初始化失败: {e}")
     sys.exit(1)
 
-def get_safe_price(obj):
-    if not obj: return 0
-    for attr in ['price', 'p', 'last', 'c', 'close']:
-        val = getattr(obj, attr, 0)
-        if val and val > 0: return float(val)
-    return 0
+def get_safe_val(obj, path, default=0):
+    """
+    深度穿透获取属性，例如 path="details.ticker"
+    """
+    try:
+        parts = path.split(".")
+        val = obj
+        for part in parts:
+            val = getattr(val, part)
+        return val
+    except:
+        return default
 
-def get_market_data_compatible(tickers):
+def get_market_data_robust(tickers):
     context = {}
     for t in tickers:
         try:
             log(f"📡 穿透标的数据: {t}")
             sn = client_poly.get_snapshot_ticker("stocks", t)
-            price = get_safe_price(sn.last_trade)
-            if price == 0: price = get_safe_price(sn.prev_day)
             
+            # 股价提取：适配最新 SDK
+            price = get_safe_val(sn, "last_trade.price")
+            if price == 0: price = get_safe_val(sn, "prev_day.c")
             log(f"🎯 {t} 确认价格: {price}")
 
-            # --- 修复核心：去掉 API 端的 sort 参数，改为本地排序 ---
-            log(f"⛓️ 正在扫描活跃期权链: {t}")
+            log(f"⛓️ 扫描期权链: {t}")
             all_options = []
-            # 只限制 limit，不传 sort，防止 API 报错
             chain = client_poly.list_snapshot_options_chain(t, params={"limit": 50})
             
             for o in chain:
-                o_px = get_safe_price(o.last_trade)
-                if o_px == 0: o_px = get_safe_price(o.day)
+                # 修复核心：期权代码在 details.ticker 
+                o_ticker = get_safe_val(o, "details.ticker", "")
+                o_px = get_safe_val(o, "last_trade.price")
+                if o_px == 0: o_px = get_safe_val(o, "day.c")
                 
-                if o_px > 0:
+                if o_ticker and o_px > 0:
                     all_options.append({
-                        "ticker": o.ticker,
-                        "strike": getattr(o.details, 'strike_price', 0),
-                        "type": getattr(o.details, 'contract_type', 'unknown'),
+                        "ticker": o_ticker,
+                        "strike": get_safe_val(o, "details.strike_price"),
+                        "type": get_safe_val(o, "details.contract_type", "unknown"),
                         "price": o_px,
-                        "vol": getattr(o.day, 'v', 0)
+                        "vol": get_safe_val(o, "day.v")
                     })
             
-            # 在 Python 本地按成交量排序，取前 15 个给 AI
+            # 本地按成交量排序
             sorted_options = sorted(all_options, key=lambda x: x['vol'], reverse=True)[:15]
             
             context[t] = {"price": price, "options": sorted_options}
-            log(f"✅ {t} 数据就绪 (价格:{price}, 期权:{len(sorted_options)}个)")
+            log(f"✅ {t} 数据就绪 (价格:{price}, 期权数:{len(sorted_options)})")
             
         except Exception as e:
-            log(f"⚠️ {t} 采集异常: {e}")
-            context[t] = {"price": 0, "options": []}
+            log(f"⚠️ {t} 数据采集部分受阻: {e}")
+            # 注意：即便期权链报错，只要拿到了 price 就不应该让 context[t] 整体失效
+            if 'price' not in locals() or price == 0:
+                context[t] = {"price": 0, "options": []}
+            else:
+                context[t] = {"price": price, "options": []}
     return context
 
 def patrol_and_evolve():
@@ -76,12 +87,12 @@ def patrol_and_evolve():
     for d in drones:
         try:
             log(f"--- 🐝 处理工蜂: {d['name']} ---")
-            m_data = get_market_data_compatible(d.get('portfolio', ['GLD']))
+            m_data = get_market_data_robust(d.get('portfolio', ['GLD']))
             
-            # 只有当真的没拿到价格时才跳过
-            gld_p = m_data.get('GLD', {}).get('price', 0)
-            if gld_p == 0:
-                log(f"❗ 警告：无法获取 {d['name']} 的标的价格，跳过。")
+            # 获取标的价格，判断是否跳过决策
+            gld_info = m_data.get('GLD', m_data.get(next(iter(m_data)) if m_data else {}, {}))
+            if gld_info.get('price', 0) == 0:
+                log(f"❗ 错误：无法获取有效价格，跳过 {d['name']}")
                 continue
 
             prompt = "你是工蜂{}。性格:{}。余额:{}。持仓:{}。行情:{}。返回纯JSON: {{'trades':[], 'thought':'', 'learning':''}}".format(
@@ -114,7 +125,8 @@ def patrol_and_evolve():
             mv = 0.0
             for s, q in new_pos.items():
                 try:
-                    lp = get_safe_price(client_poly.get_last_trade(s))
+                    lp_obj = client_poly.get_last_trade(s)
+                    lp = getattr(lp_obj, 'price', getattr(lp_obj, 'p', 0))
                     mv += q * lp * (100 if s.startswith("O:") else 1)
                 except: pass
 
