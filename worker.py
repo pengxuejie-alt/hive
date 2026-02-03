@@ -2,103 +2,102 @@
 from google import genai
 from polygon import RESTClient
 from supabase import create_client
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
     sys.stdout.flush()
 
-log("🚀 深度行情排查引擎启动...")
+log("🚀 属性适配引擎启动 (Fix: Attribute 'p')...")
 
 try:
-    # 增加长连接配置
     client_poly = RESTClient(api_key=os.environ.get("POLYGON_KEY"))
     supabase = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
     gen_client = genai.Client(api_key=os.environ.get("GEMINI_KEY"))
     MODEL_ID = "gemini-3-flash-preview"
-    log("✅ API 链路初始化完成")
+    log("✅ 客户端重连成功")
 except Exception as e:
     log(f"❌ 初始化失败: {e}")
     sys.exit(1)
 
-def get_market_data_debug(tickers):
-    """深度排查逻辑：确保期权链和股价必须拿到"""
+def get_safe_price(obj):
+    """万能价格提取器：适配 .p, .price, .c 等多种返回格式"""
+    if not obj: return 0
+    # 依次尝试可能的属性名
+    for attr in ['price', 'p', 'last', 'c', 'close']:
+        val = getattr(obj, attr, 0)
+        if val and val > 0: return float(val)
+    return 0
+
+def get_market_data_robust(tickers):
     context = {}
     for t in tickers:
         try:
-            log(f"--- 📡 正在拉取标的详情: {t} ---")
-            # 1. 获取股价：改用 Snapshot 模式，它包含盘前盘后和上一个交易日的终值
-            ticker_snapshot = client_poly.get_snapshot_ticker("stocks", t)
-            price = 0
-            if ticker_snapshot and ticker_snapshot.last_trade:
-                price = ticker_snapshot.last_trade.p
-            if price == 0 and ticker_snapshot.prev_day:
-                price = ticker_snapshot.prev_day.c # 拿昨收价保底
+            log(f"📡 穿透标的数据: {t}")
+            # 获取 Snapshot
+            sn = client_poly.get_snapshot_ticker("stocks", t)
             
-            log(f"🎯 {t} 实时/昨收价: {price}")
+            # 1. 提取股价 (多级回退)
+            price = get_safe_price(sn.last_trade)
+            if price == 0: price = get_safe_price(sn.prev_day)
+            
+            log(f"🎯 {t} 确认价格: {price}")
 
-            # 2. 获取期权链：必须想办法突破全量限制
-            log(f"⛓️ 正在扫描 {t} 的期权快照链...")
+            # 2. 提取期权链
+            log(f"⛓️ 正在扫描活跃期权链: {t}")
             options_pool = []
+            chain = client_poly.list_snapshot_options_chain(
+                t, params={"limit": 15, "sort": "volume", "order": "desc"}
+            )
             
-            # 使用更严谨的分页或筛选，这里我们拿活跃度最高的前 20 个
-            # 如果这里报错，说明是 API Key 权限或 Polygon 瞬时封禁
-            try:
-                # 显式增加 limit 参数并打印原始状态
-                chain_gen = client_poly.list_snapshot_options_chain(
-                    t, 
-                    params={"limit": 20, "sort": "volume", "order": "desc"}
-                )
+            for o in chain:
+                # 安全获取期权价格
+                o_px = get_safe_price(o.last_trade)
+                if o_px == 0: o_px = get_safe_price(o.day)
                 
-                for o in chain_gen:
-                    # 只要是有基本成交数据的合约都抓进来
-                    opt_price = getattr(o.last_trade, 'p', 0)
-                    if opt_price == 0 and o.day:
-                        opt_price = getattr(o.day, 'c', 0)
-                    
+                # 只要有价格就记录
+                if o_px > 0:
                     options_pool.append({
                         "ticker": o.ticker,
-                        "strike": o.details.strike_price,
-                        "type": o.details.contract_type,
-                        "price": opt_price,
+                        "strike": getattr(o.details, 'strike_price', 0),
+                        "type": getattr(o.details, 'contract_type', 'unknown'),
+                        "price": o_px,
                         "vol": getattr(o.day, 'v', 0)
                     })
-                log(f"✅ 成功抓取到 {len(options_pool)} 个活跃期权合约")
-            except Exception as chain_err:
-                log(f"❌ 期权链抓取失败核心原因: {str(chain_err)}")
-
+            
             context[t] = {"price": price, "options": options_pool}
+            log(f"✅ {t} 数据就绪 (价格:{price}, 期权:{len(options_pool)}个)")
             
         except Exception as e:
-            log(f"💥 {t} 总体采集崩溃: {e}")
+            log(f"⚠️ {t} 采集逻辑触发异常: {e}")
+            context[t] = {"price": 0, "options": []}
     return context
 
 def patrol_and_evolve():
-    d_res = supabase.table("drones").select("*").execute()
-    drones = d_res.data
+    res = supabase.table("drones").select("*").execute()
+    drones = res.data
     ts = datetime.now(pytz.timezone('US/Eastern')).strftime("%H:%M:%S")
 
     for d in drones:
         try:
-            log(f"--- 🐝 正在处理工蜂: {d['name']} ---")
-            m_data = get_market_data_debug(d.get('portfolio', ['GLD']))
+            log(f"--- 🐝 处理工蜂: {d['name']} ---")
+            m_data = get_market_data_robust(d.get('portfolio', ['GLD']))
             
-            # 检查关键数据
-            gld_data = m_data.get('GLD', {})
-            if gld_data.get('price', 0) == 0:
-                log(f"⚠️ 警告: {d['name']} 拿到的 GLD 价格依然为 0，请检查 Polygon Key 权限！")
+            if m_data.get('GLD', {}).get('price', 0) == 0:
+                log("❗ 警告：未能获取到 GLD 有效价格，跳过此轮决策。")
+                continue
 
-            prompt = f"你是工蜂{d['name']}。性格:{d['persona']}。余额:{d['balance']}。行情:{json.dumps(m_data)}。决策JSON: {{'trades':[], 'thought':'', 'learning':''}}"
-            
-            res = gen_client.models.generate_content(
-                model=MODEL_ID, contents=prompt,
-                config={'response_mime_type': 'application/json'}
+            prompt = "你是工蜂{}。性格:{}。余额:{}。持仓:{}。行情:{}。返回纯JSON: {{'trades':[], 'thought':'', 'learning':''}}".format(
+                d['name'], d['persona'], d['balance'], d.get('positions'), json.dumps(m_data)
             )
             
-            cmd = json.loads(res.text)
+            ai_res = gen_client.models.generate_content(
+                model=MODEL_ID, contents=prompt, config={'response_mime_type': 'application/json'}
+            )
+            cmd = json.loads(ai_res.text)
             if isinstance(cmd, list): cmd = cmd[0]
-            
-            # 交易执行逻辑 (此处保持不变)
+
+            # 交易逻辑
             new_bal, new_pos, reports = float(d['balance']), (d.get('positions', {}) or {}).copy(), []
             trades = cmd.get('trades', []) if isinstance(cmd, dict) else []
             for t in trades:
@@ -107,21 +106,21 @@ def patrol_and_evolve():
                 if t['action'] == 'BUY' and new_bal >= cost:
                     new_bal -= cost
                     new_pos[sym] = new_pos.get(sym, 0) + t['qty']
-                    reports.append(f"🟢买入 {sym}")
+                    reports.append("🟢买入 {}".format(sym))
                 elif t['action'] == 'SELL' and new_pos.get(sym, 0) >= t['qty']:
                     new_bal += cost
                     new_pos[sym] -= t['qty']
                     if new_pos[sym] <= 0: del new_pos[sym]
-                    reports.append(f"🔴卖出 {sym}")
+                    reports.append("🔴卖出 {}".format(sym))
 
-            # 资产重估
+            # 重估总资产
             mv = 0.0
             for s, q in new_pos.items():
                 try:
-                    mv += q * client_poly.get_last_trade(s).price * (100 if s.startswith("O:") else 1)
+                    lp = get_safe_price(client_poly.get_last_trade(s))
+                    mv += q * lp * (100 if s.startswith("O:") else 1)
                 except: pass
 
-            log("💾 正在回写数据库...")
             log_str = "[{}] {} | 🧠 {}".format(ts, " | ".join(reports) if reports else "🟡观望", cmd.get('thought', '...'))
             supabase.table("drones").update({
                 "balance": new_bal, "positions": new_pos, "total_assets": round(new_bal + mv, 2),
@@ -130,11 +129,11 @@ def patrol_and_evolve():
                 "memory": cmd.get('learning', '')
             }).eq("id", d["id"]).execute()
             
-            log(f"✨ {d['name']} 任务完成")
-            time.sleep(2) # 蜂群间隔，保护 API
+            log(f"✨ {d['name']} 巡检完毕")
+            time.sleep(1) # 保护 API
 
         except Exception as e:
-            log(f"❌ {d['name']} 异常详情: {e}")
+            log(f"❌ {d['name']} 崩溃: {e}")
 
 if __name__ == "__main__":
     patrol_and_evolve()
