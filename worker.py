@@ -23,17 +23,16 @@ def patrol_and_evolve():
     for d in drones:
         try:
             print(f"--- {d['name']} 巡航 ---")
-            m_data = {"market_status": "Live" if market_open else "Closed"}
+            m_data = {"status": "Live" if market_open else "Closed"}
             
-            restriction = "" if market_open else "【非交易时段：禁止 BUY/SELL。请仅分析并在 memory 中记录你的交易复盘心得。】"
+            restriction = "" if market_open else "【非交易时段：禁止 BUY/SELL。请仅进行行情分析并在 memory 中记录你想做的决策理由。】"
             
-            # 强化兵蜂复盘意识
-            prompt = f"""你是兵蜂 {d['name']}。
-            基因逻辑：{d['logic']} ({d['persona']})
-            往期复盘：{d.get('memory')}
-            余额：${d['balance']} | 行情：{m_data}
+            # 强化兵蜂的复盘记录
+            prompt = f"""你是兵蜂 {d['name']}。基因：{d['logic']} ({d['persona']})。
+            往期复盘经验：{d.get('memory')}
+            账户：${d['balance']} | 行情：{m_data}
             {restriction}
-            请决策并深度复盘。返回JSON：{{"action":"BUY/SELL/HOLD","symbol":"...","qty":0,"price":0,"reason":"具体的思考逻辑","learning":"策略复盘心得"}}"""
+            请决策并深度复盘。返回 JSON：{{"action":"BUY/SELL/HOLD","symbol":"...","qty":0,"price":0,"reason":"具体决策理由","learning":"自我复盘心得"}}"""
             
             res = model.generate_content(prompt).text.strip()
             cmd = json.loads(res.replace("```json", "").replace("```", "").strip())
@@ -52,8 +51,8 @@ def patrol_and_evolve():
                     pos = d.get('positions', {}).copy(); pos[cmd['symbol']] = pos.get(cmd['symbol'], 0) + cmd['qty']
                     update['positions'] = pos
 
-            # 更新记忆，实现后天进化
-            update['memory'] = f"【最新复盘】: {cmd['learning']}"
+            # 重点：自我复盘迭代并存入 memory
+            update['memory'] = f"【最新复盘】：{cmd['learning']}"
             update['peak_balance'] = max(float(d.get('peak_balance') or 0), float(update.get('balance', d['balance'])), 1.0)
             
             supabase.table("drones").update(update).eq("id", d["id"]).execute()
