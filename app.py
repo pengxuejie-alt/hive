@@ -7,10 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from polygon import RESTClient
 
-# --- 1. 中枢与版本配置 ---
-# 🚀 切换至你在 GCP 看到的 1000 RPM 模型
-VERSION = "v3.3 (Flash-3 Armor)"
-ACTIVE_BRAIN = "gemini-3-flash" 
+# --- 1. 环境与大脑配置 ---
+# 🚀 修正为预览版 ID，对齐 1000 RPM 配额
+VERSION = "v3.5 (Preview Edition)"
+ACTIVE_BRAIN = "gemini-3-flash-preview" 
 
 def get_config(key): return os.environ.get(key) or st.secrets.get(key)
 
@@ -23,44 +23,39 @@ try:
 except Exception as e:
     st.error(f"❌ 蜂巢初始化失败: {e}"); st.stop()
 
-# --- 2. 神经研判逻辑 (带 3 次退避重试) ---
+# --- 2. 神经调度引擎 (重试与解析保护) ---
 def safe_brain_decision(prompt):
-    """对抗瞬时并发 429 的核心防御"""
     for attempt in range(3):
         try:
-            # 即便配额是 1000，也要加入微小抖动错开突刺
-            time.sleep(random.uniform(0.3, 0.8))
-            
+            time.sleep(random.uniform(0.2, 0.5))
             r = gen_client.models.generate_content(
                 model=ACTIVE_BRAIN, 
                 contents=prompt, 
                 config={'response_mime_type': 'application/json'}
             )
+            # 处理可能的结构化返回
             data = json.loads(r.text)
-            # 修复 AttributeError: 确保返回的是字典
-            return data[0] if isinstance(data, list) else data
-            
+            if isinstance(data, list): data = data[0]
+            return data
         except Exception as e:
+            if "404" in str(e):
+                st.error(f"⚠️ ID 映射失效: {ACTIVE_BRAIN} 无法识别。请确认 API 版本。")
+                st.stop()
             if "429" in str(e) and attempt < 2:
-                wait = (attempt + 1) * 3
-                st.toast(f"⏳ 神经中枢微调中，等待 {wait} 秒...", icon="🧠")
+                wait = (attempt + 1) * 2
+                st.toast(f"⏳ 拥堵避让 {wait}s...", icon="🧠")
                 time.sleep(wait)
                 continue
             raise e
 
-# --- 3. 价格采集引擎 ---
-def fetch_nectar(ticker, needs_options=True):
+# --- 3. 价格穿透采集 ---
+def fetch_nectar(ticker):
     try:
         sn = poly_client.get_snapshot_ticker("stocks", ticker)
         price = getattr(sn, 'price', 0)
         if price == 0:
             price = getattr(sn.last_trade, 'p', 0) if hasattr(sn, 'last_trade') else getattr(sn.prev_day, 'c', 0)
-        
-        data = {"代码": ticker, "现价": price, "涨跌%": round(getattr(sn, 'todays_change_percent', 0), 2)}
-        if needs_options and price > 0:
-            opts = list(poly_client.list_snapshot_options_chain(ticker, params={"limit": 10}))
-            data["期权动态"] = f"核心合约: {len(opts)}"
-        return data
+        return {"代码": ticker, "现价": price, "涨跌%": round(getattr(sn, 'todays_change_percent', 0), 2)}
     except: return {"代码": ticker, "现价": 0, "状态": "超时"}
 
 # --- 4. 演化任务 ---
@@ -68,15 +63,10 @@ def execute_worker_cycle(d, status_container):
     t_start = time.time()
     try:
         with status_container:
-            st.write("📡 **正在嗅探多源行情...**")
-            logic = (d.get('logic','') + d.get('persona','')).lower()
-            needs_opt = "期权" in logic
-            
+            st.write("📡 **正在穿透市场嗅探行情...**")
             with ThreadPoolExecutor(max_workers=5) as exe:
-                results = list(exe.map(lambda t: fetch_nectar(t, needs_opt), d.get('portfolio', ['GLD'])))
+                results = list(exe.map(fetch_nectar, d.get('portfolio', ['GLD'])))
             nectar_data = {r['代码']: r for r in results if r['现价'] > 0}
-            
-            # 行情透明化展示
             st.json(nectar_data)
 
             st.write(f"🧠 **神经研判中 (`{ACTIVE_BRAIN}`)...**")
@@ -89,18 +79,18 @@ def execute_worker_cycle(d, status_container):
             for t in decision.get('trades', []):
                 sym, qty, act = t.get('ticker', t.get('symbol', '')), t.get('qty', 0), t.get('action', '').upper()
                 if not sym or qty <= 0: continue
-                px = fetch_nectar(sym, False)['现价']
+                px = fetch_nectar(sym)['现价']
                 cost = float(qty) * float(px) * (100 if "O:" in sym else 1)
                 if act == 'BUY' and nb >= cost:
                     nb -= cost; np[sym] = np.get(sym, 0) + qty
-                    reports.append(f"🟢入库 {sym}")
+                    reports.append(f"🟢买入 {sym}")
                 elif act == 'SELL' and np.get(sym, 0) >= qty:
                     nb += cost; np[sym] -= qty
                     if np[sym] <= 0: del np[sym]
-                    reports.append(f"🔴出库 {sym}")
+                    reports.append(f"🔴卖出 {sym}")
 
             mv = 0.0
-            for s, q in np.items(): mv += q * fetch_nectar(s, False)['现价'] * (100 if "O:" in s else 1)
+            for s, q in np.items(): mv += q * fetch_nectar(s)['现价'] * (100 if "O:" in s else 1)
             
             log_str = f"[{datetime.now().strftime('%H:%M:%S')}] {(' | '.join(reports) if reports else '观望')} | 🧠 {decision.get('thought','')}"
             supabase.table("drones").update({
@@ -121,7 +111,7 @@ st.set_page_config(page_title="Hive 蜂群系统", layout="wide")
 h1, h2 = st.columns([4, 1])
 with h1:
     st.title(f"🐝 Hive 蜂群生态系统 `{VERSION}`")
-    st.caption(f"🧠 核心大脑: `{ACTIVE_BRAIN}` | 🛡️ 已开启 1000 RPM 配额对齐")
+    st.caption(f"🧠 大脑型号: `{ACTIVE_BRAIN}` | 🛡️ 已开启 1000 RPM 配额对齐")
 with h2:
     st.write(" ")
     full_fly = st.button("🔥 全量放飞", type="primary", use_container_width=True)
@@ -137,7 +127,7 @@ with tabs[0]:
     if not d_res: st.info("请先孵化新工蜂。")
     for d in (d_res or []):
         tot, cash = d.get('total_assets', 0), d.get('balance', 0)
-        label = f"🐝 {d['name']} | 总资产: ${tot:,.2f} | 现金: ${cash:,.2f} | 最近: {d.get('logs', ['-'])[0][:35]}..."
+        label = f"🐝 {d['name']} | 资产: ${tot:,.2f} | 现金: ${cash:,.2f} | 最近: {d.get('logs', ['-'])[0][:40]}"
         is_active = st.session_state.get(f"run_{d['id']}", False)
         
         with st.expander(label, expanded=is_active):
@@ -153,7 +143,7 @@ with tabs[0]:
 with tabs[1]:
     instr = st.text_area("输入孵化指令:")
     if st.button("开始注入基因"):
-        with st.spinner("🧬 蜂后链接研判中枢中..."):
+        with st.spinner("🧬 蜂后链接中枢中..."):
             try:
                 p = f"设计JSON：{{'name':'','logic':'','persona':'','portfolio':['GLD']}}。内容中文。指令：{instr}"
                 item = safe_brain_decision(p)
