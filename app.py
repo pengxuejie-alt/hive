@@ -7,17 +7,17 @@ from google import genai
 from polygon import RESTClient
 
 # ==========================================
-# 1. 初始化 (注入专业审计样式)
+# 1. 样式与引擎初始化 (鹰眼审计版)
 # ==========================================
-VERSION = "v13.7 (Eagle Eye Final)"
+VERSION = "v13.8 (Eagle Eye Pro)"
 st.set_page_config(page_title="Hive 智能金融审计", layout="wide")
 
 st.markdown("""
     <style>
-    .time-tag { color: #888; font-size: 0.75rem; font-family: monospace; }
-    .data-row { color: #1a73e8; font-weight: bold; font-family: monospace; font-size: 0.95rem; margin-top: 5px; border-bottom: 1px solid #f0f0f0; padding-bottom: 3px; }
-    .thought-block { font-size: 0.75rem; color: #666; background: #f8f9fa; padding: 12px; border-radius: 8px; border-left: 4px solid #ddd; margin: 8px 0; line-height: 1.5; white-space: pre-wrap; }
-    .action-row { color: #d93025; font-weight: 800; font-size: 0.9rem; margin-top: 5px; }
+    .time-tag { color: #888; font-size: 0.7rem; font-family: monospace; }
+    .data-row { color: #1a73e8; font-weight: bold; font-family: monospace; font-size: 0.9rem; margin-top: 4px; border-bottom: 1px solid #f0f0f0; padding-bottom: 2px; }
+    .thought-block { font-size: 0.75rem; color: #6c757d; background: #f9f9f9; padding: 10px; border-radius: 6px; border-left: 3px solid #dee2e6; margin: 6px 0; line-height: 1.4; white-space: pre-wrap; }
+    .action-row { color: #d93025; font-weight: 800; font-size: 0.85rem; margin-top: 4px; }
     .stMetric { background-color: #ffffff; border: 1px solid #eee; padding: 10px; border-radius: 8px; }
     </style>
 """, unsafe_allow_html=True)
@@ -44,7 +44,7 @@ def get_val(obj, *keys):
     return 0.0
 
 # ==========================================
-# 2. 行情逻辑 (复刻虎之眼核心)
+# 2. 虎之眼行情逻辑 (标的/期权穿透)
 # ==========================================
 def get_verified_price(poly, ticker):
     try:
@@ -69,7 +69,7 @@ def get_verified_price(poly, ticker):
     except: return 0.0
 
 # ==========================================
-# 3. 🚨 核心：重构后的决策审计引擎
+# 3. 🚨 核心：修正 Value Error 的决策引擎
 # ==========================================
 def execute_flight(d, clients):
     est = pytz.timezone('US/Eastern')
@@ -81,27 +81,29 @@ def execute_flight(d, clients):
     curr_p = get_verified_price(clients['poly'], tk)
     
     cash, pos = float(d['balance']), d.get('positions', {})
-    # 计算实时持仓总市值
     mv_total = sum([get_verified_price(clients['poly'], s) * q * 100 for s, q in pos.items()])
     nav = cash + mv_total
 
-    prompt = f"""你是{d['name']}。DNA:{dna} | 历史记忆:{history}
+    # 💡 关键修正：所有 JSON 大括号必须双写 {{ }}，包含 trades 内部的结构
+    prompt = f"""你是{d['name']}。性格DNA:{dna} | 历史记忆:{history}
     🚨 环境底稿：
     - {tk}现价: ${curr_p:.2f} | NAV(总资产): ${nav:,.2f}
-    - 现金: ${cash:,.2f} | 持仓总值: ${mv_total:,.2f}
-    - 详细持仓: {json.dumps(pos)}
+    - 现金: ${cash:,.2f} | 持仓总值: ${mv_total:,.2f} | 持仓明细: {json.dumps(pos)}
 
     要求: 
-    1. 必须根据 NAV 的盈亏调整交易倾向，亏损时优先考虑回撤控制。
-    2. 严格按 JSON 返回汇报，禁止废话：
-    {{ "thought": "思考逻辑并分段", "trades": [{"ticker": "O:...", "qty": 10, "action": "BUY/SELL"}] }}
+    1. 关注 NAV 的真实盈亏（本金$100,000），盈利时减仓锁利，亏损时严格控回撤。
+    2. 严格按 JSON 返回汇报：
+    {{ "thought": "思考逻辑并分段", "trades": [{{ "ticker": "O:...", "qty": 10, "action": "BUY/SELL" }}] }}
     """
     
     try:
-        r = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=prompt, config={'response_mime_type': 'application/json'})
+        r = clients['gen_client'].models.generate_content(
+            model="gemini-2.0-flash", 
+            contents=prompt, 
+            config={'response_mime_type': 'application/json'}
+        )
         res = json.loads(r.text)
         
-        # 结算逻辑 (兼容 ticker/symbol)
         nb, np = cash, pos.copy()
         exec_logs = []
         for t in res.get('trades', []):
@@ -121,7 +123,7 @@ def execute_flight(d, clients):
                 if np[sym] <= 0: del np[sym]
                 exec_logs.append(f"卖出{qty}手 {sym} @${px:.2f}")
 
-        # 🚨 按照指定顺序构造极简 Log
+        # 🚨 重构 Log 文本：顺序对齐 [行情 -> 总资产 -> 现金 -> 持仓]
         log_entry = (
             f"🕒 {now_tag} | "
             f"📊 {tk}:${curr_p:.2f} | NAV:${nav:,.2f} | 现金:${cash:,.2f} | 持仓:${mv_total:,.2f} | "
@@ -137,11 +139,11 @@ def execute_flight(d, clients):
         time.sleep(1.2)
         return True
     except Exception as e:
-        st.error(f"研判执行失败: {e}")
+        st.error(f"决策引擎解析异常: {e}")
         return False
 
 # ==========================================
-# 4. 界面渲染 (专业审计看板)
+# 4. 界面渲染 (专业理财通栏卡片)
 # ==========================================
 st.title("🐝 Hive 智能金融审计中心")
 d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
@@ -149,32 +151,32 @@ d_res = clients['supabase'].table("drones").select("*").order("created_at", desc
 for d in d_res:
     with st.container(border=True):
         h_l, h_r = st.columns([5, 1])
-        h_l.subheader(f"🐝 {d['name']} | 深度审计看板")
+        h_l.subheader(f"🐝 {d['name']} | 深度审计视图")
         if h_r.button(f"🚀 放飞研判", key=f"f_{d['id']}", type="primary", use_container_width=True):
             if execute_flight(d, clients): st.cache_data.clear(); st.rerun()
 
-        # Metrics 网格
+        # 资产网格
         cash, pos = float(d.get('balance', 0.0)), d.get('positions', {})
         mv_total, pos_table = 0.0, []
         for sym, qty in pos.items():
             px = get_verified_price(clients['poly'], sym)
             mv = px * qty * (100 if "O:" in sym else 1)
             mv_total += mv
-            pos_table.append({"代码": sym, "持仓": f"{qty}手", "市值": f"${mv:,.2f}"})
+            pos_table.append({"代码": sym, "持仓": f"{qty}手", "估值": f"${mv:,.2f}"})
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("现金 (Cash)", f"${cash:,.2f}")
-        m2.metric("持仓估值 (MV)", f"${mv_total:,.2f}")
+        m1.metric("可用现金", f"${cash:,.2f}")
+        m2.metric("持仓估值", f"${mv_total:,.2f}")
         m3.metric("NAV (总资产)", f"${cash+mv_total:,.2f}", delta=f"{((cash+mv_total)/100000-1)*100:.2f}%")
         m4.metric("审计深度", f"{len(d.get('logs') or [])} 条")
 
         st.divider()
         st.write("📦 **实时投资组合 (Portfolio)**")
         if pos_table: st.dataframe(pd.DataFrame(pos_table), hide_index=True, use_container_width=True)
-        else: st.caption("当前无持仓")
+        else: st.caption("当前账户无持仓。")
 
         st.divider()
-        st.write("🧠 **三维度审计轨迹 (Data / Thought / Action)**")
+        st.write("🧠 **三维度审计记忆 (Data / Thought / Action)**")
         
         for log in (d.get('logs') or [])[:5]:
             with st.chat_message("assistant", avatar="🐝"):
@@ -183,16 +185,12 @@ for d in d_res:
                     st.caption(log)
                     continue
                 
-                t_stamp = parts[0]
-                d_part = parts[1]
-                th_part = parts[2]
-                ac_part = parts[3] if len(parts) > 3 else "⚡ 行动: 观望"
-
-                # 1. 时间戳
-                st.markdown(f'<span class="time-tag">{t_stamp}</span>', unsafe_allow_html=True)
-                # 2. 数据层 (行情/资产)
-                st.markdown(f'<div class="data-row">{d_part}</div>', unsafe_allow_html=True)
-                # 3. 思考层 (灰色小字分段)
-                st.markdown(f'<div class="thought-block">{th_part.replace("🧠 思考:", "").strip()}</div>', unsafe_allow_html=True)
-                # 4. 行动层 (红色高亮)
-                st.markdown(f'<div class="action-row">{ac_part}</div>', unsafe_allow_html=True)
+                # 时间戳
+                st.markdown(f'<span class="time-tag">{parts[0]}</span>', unsafe_allow_html=True)
+                # 数据行 (行情优先)
+                st.markdown(f'<div class="data-row">{parts[1]}</div>', unsafe_allow_html=True)
+                # 思考块 (分段缩小)
+                st.markdown(f'<div class="thought-block">{parts[2].replace("🧠 思考:", "").strip()}</div>', unsafe_allow_html=True)
+                # 行动行 (红色)
+                ac_p = parts[3] if len(parts) > 3 else "⚡ 行动: 观望"
+                st.markdown(f'<div class="action-row">{ac_p}</div>', unsafe_allow_html=True)
