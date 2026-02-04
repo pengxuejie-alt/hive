@@ -1,5 +1,5 @@
 import streamlit as st
-import json, time, os, random, re
+import json, time, os, random, re, pytz
 import pandas as pd
 from datetime import datetime, timedelta
 from supabase import create_client
@@ -7,7 +7,7 @@ from google import genai
 from polygon import RESTClient
 
 # --- 1. 全局配置 ---
-VERSION = "v10.4 (404 Path Fix)"
+VERSION = "v10.7 (Memory Palace)"
 st.set_page_config(page_title="Hive 智能金融", layout="wide")
 st.title("🐝 Hive 智能金融蜂群")
 
@@ -22,60 +22,28 @@ def parse_option_symbol(symbol):
         return f"{tk} {mm}/{dd} ${strike_val} {type_str}"
     return symbol
 
-@st.cache_resource
-def init_hive_engine():
+def calculate_age(created_at_str):
     try:
-        return {
-            "supabase": create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"]),
-            "gen_client": genai.Client(api_key=st.secrets["GEMINI_KEY"]),
-            "poly": RESTClient(api_key=st.secrets["POLYGON_KEY"])
-        }, None
-    except Exception as e: return None, str(e)
+        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+        now = datetime.now(pytz.UTC)
+        delta = now - created_at
+        if delta.days > 0: return f"{delta.days}天 {delta.seconds // 3600}小时"
+        return f"{delta.seconds // 3600}小时"
+    except: return "刚刚诞生"
 
-def get_val(obj, *keys):
-    if not obj: return 0.0
-    for k in keys:
-        v = getattr(obj, k, None)
-        if v is not None: return float(v)
-    return 0.0
-
-# --- 3. 🚨 终极核算：绕过 404 的 Aggs 取价法 ---
+# --- 3. 实时穿透取价 ---
 def get_verified_price_v4(poly, symbol):
-    # 确保前缀正确
     ticker = symbol if symbol.startswith("O:") else f"O:{symbol}"
     try:
-        # 💡 既然 Snapshot 报 404，我们改用 Aggregates 接口
-        # 获取今天和昨天的分钟线，取最后一条
         end = datetime.now()
-        start = end - timedelta(days=2)
-        
-        # 调用 Aggs 接口（这是 Polygon 最稳定的底层接口）
-        aggs = poly.get_aggs(
-            ticker, 
-            1, 
-            "minute", 
-            start.strftime("%Y-%m-%d"), 
-            end.strftime("%Y-%m-%d")
-        )
-        
-        if aggs:
-            # 取最后一条分钟线的收盘价
-            return float(aggs[-1].close)
-        
-        # 如果分钟线没有（可能没成交），尝试日线
-        daily_aggs = poly.get_aggs(
-            ticker, 
-            1, 
-            "day", 
-            start.strftime("%Y-%m-%d"), 
-            end.strftime("%Y-%m-%d")
-        )
+        start = end - timedelta(days=3)
+        aggs = poly.get_aggs(ticker, 1, "minute", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if aggs: return float(aggs[-1].close)
+        daily_aggs = poly.get_aggs(ticker, 1, "day", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
         return float(daily_aggs[-1].close) if daily_aggs else 0.01
-    except Exception as e:
-        st.sidebar.error(f"Aggs 穿透失败 {ticker}: {e}")
-        return 0.0
+    except: return 0.01
 
-# --- 4. 看板布局渲染 ---
+# --- 4. 初始化 ---
 cl_pkg, err = init_hive_engine()
 if err: st.error(err); st.stop()
 clients = cl_pkg
@@ -83,42 +51,57 @@ clients = cl_pkg
 try: d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
 except: d_res = []
 
+# --- 5. UI 渲染 ---
 tabs = st.tabs(["🏆 蜂群看板", "👑 基因孵化", "⚙️ 管理"])
 
 with tabs[0]:
     for d in d_res:
-        with st.expander(f"🐝 {d['name']} | 巡逻: {d.get('patrol_count',0)}次", expanded=True):
+        with st.expander(f"🐝 {d['name']} | 存活: {calculate_age(d.get('created_at'))} | 巡逻: {d.get('patrol_count',0)}次", expanded=True):
+            # 💰 资产核算
             cash = float(d.get('balance', 0.0))
             pos = d.get('positions', {})
             mv_total = 0.0
             pos_table = []
             
             if pos:
-                st.write("🔍 **全链路穿透询价中 (Aggs Mode)...**")
                 for sym, qty in pos.items():
-                    with st.spinner(f"正在同步 {sym} 的 K 线数据..."):
-                        unit_px = get_verified_price_v4(clients['poly'], sym)
-                        multiplier = 100 if sym.startswith("O:") else 1
-                        item_mv = unit_px * qty * multiplier
-                        mv_total += item_mv
-                        pos_table.append({
-                            "合约": parse_option_symbol(sym),
-                            "数量": f"{qty} 手",
-                            "实时单价": f"${unit_px:.4f}",
-                            "市值": f"${item_mv:,.2f}"
-                        })
+                    unit_px = get_verified_price_v4(clients['poly'], sym)
+                    item_mv = unit_px * qty * (100 if sym.startswith("O:") else 1)
+                    mv_total += item_mv
+                    pos_table.append({"合约": parse_option_symbol(sym), "数量": f"{qty} 手", "单价": f"${unit_px:.4f}", "市值": f"${item_mv:,.2f}"})
 
             total_assets = cash + mv_total
             pnl_pct = ((total_assets / 100000.0) - 1) * 100
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("现金余额 (Cash)", f"${cash:,.2f}")
-            m2.metric("持仓市值 (Market Value)", f"${mv_total:,.2f}")
-            m3.metric("总资产 (Total Assets)", f"${total_assets:,.2f}", delta=f"{pnl_pct:.2f}%")
+            # 顶部资产卡片
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("现金", f"${cash:,.2f}")
+            m2.metric("持仓市值", f"${mv_total:,.2f}")
+            m3.metric("总资产", f"${total_assets:,.2f}", delta=f"{pnl_pct:.2f}%")
+            m4.metric("记忆深度", f"{len(d.get('logs') or [])} 条")
 
             st.divider()
-            if pos_table:
-                st.table(pos_table)
             
-            if st.button(f"🚀 放飞 {d['name']}", key=f"f_{d['id']}"):
-                st.rerun()
+            # 核心内容区
+            c1, c2 = st.columns([1, 1.5])
+            with c1:
+                st.write("🧬 **灵魂特质 (Persona)**")
+                st.info(d.get('style', '未载入灵魂特质'))
+                
+                # --- 🧠 记忆展示区 ---
+                st.write("📜 **长期记忆 (Memory Logs)**")
+                memory_logs = d.get('logs') or []
+                if memory_logs:
+                    with st.container(height=250): # 增加滚动容器
+                        for log in memory_logs:
+                            st.caption(f"🔘 {log}")
+                else:
+                    st.caption("暂无历史记忆...")
+                
+                if st.button(f"🚀 放飞 {d['name']}", key=f"f_{d['id']}", type="primary", use_container_width=True):
+                    st.rerun()
+            
+            with c2:
+                st.write("**📦 实盘持仓明细**")
+                if pos_table: st.table(pos_table)
+                else: st.caption("目前账户为空仓状态")
