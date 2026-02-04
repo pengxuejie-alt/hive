@@ -1,48 +1,35 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client
-import json, time, os, random
+import json, time, os
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from polygon import RESTClient
 
-# --- 1. 神经中枢：硬核兼容探测 ---
+# --- 1. 神经中枢：强制 2.0 旗舰 ---
+# 2026 官方起步标准：gemini-2.0-flash-exp
+ACTIVE_MODEL = "gemini-2.0-flash-exp"
+
 def get_config(key): 
     return os.environ.get(key) or st.secrets.get(key)
-
-@st.cache_resource
-def discover_active_brain():
-    """实战探测：不依赖属性查询，直接通过握手确认"""
-    gk = get_config("GEMINI_KEY")
-    client = genai.Client(api_key=gk)
-    # 2026 官方推荐的优先顺序
-    candidates = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
-    
-    for m_id in candidates:
-        try:
-            # 发起微型握手
-            client.models.generate_content(model=m_id, contents="ping")
-            return m_id
-        except:
-            continue
-    return "gemini-1.5-flash" # 最终保底名
 
 try:
     S_URL, S_KEY = get_config("SUPABASE_URL"), get_config("SUPABASE_KEY")
     G_KEY, P_KEY = get_config("GEMINI_KEY"), get_config("POLYGON_KEY")
     
     supabase = create_client(S_URL, S_KEY)
+    # 使用 Google 官方 2026 标准客户端
     gen_client = genai.Client(api_key=G_KEY)
     poly_client = RESTClient(api_key=P_KEY)
     
-    # 锁定当前真实可用的大脑
-    ACTIVE_MODEL = discover_active_brain()
+    # 强制进行一次 2.0 握手，失败则直接报错
+    gen_client.models.generate_content(model=ACTIVE_MODEL, contents="ping")
 except Exception as e:
-    st.error(f"蜂巢中枢连接中断: {e}")
+    st.error(f"❌ 神经中枢 2.0 核心启动失败: {e}")
     st.stop()
 
-# --- 2. 蜜源采集 (虎之眼级别穿透) ---
+# --- 2. 蜜源采集 (对齐虎之眼) ---
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -75,12 +62,12 @@ def fetch_nectar(ticker, needs_options=True):
         return data
     except: return {"代码": ticker, "现价": 0}
 
-# --- 3. 演化逻辑 ---
+# --- 3. 演化任务 ---
 def run_evolution(d):
     t_start = time.time()
-    with st.status(f"🐝 工蜂 [{d['name']}] 正在采蜜...", expanded=True) as status:
+    with st.status(f"🐝 工蜂 [{d['name']}] 任务中...", expanded=True) as status:
         try:
-            status.write("📡 嗅探实时蜜源...")
+            status.write("📡 嗅探市场蜜源...")
             logic = (d.get('logic','') + d.get('persona','')).lower()
             needs_opt = "期权" in logic or "option" in logic
             
@@ -89,12 +76,17 @@ def run_evolution(d):
             nectar_data = {r['代码']: r for r in results if r['现价'] > 0}
 
             status.write(f"🧠 咨询神经中枢 (`{ACTIVE_MODEL}`)...")
-            prompt = f"你是工蜂{d['name']}。性格:{d['persona']}。资金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data, ensure_ascii=False)}。返回纯JSON：{{'trades':[], 'thought':'中文研判', 'learning':'演化记忆'}}"
+            prompt = f"工蜂{d['name']}。基因:{d['persona']}。资金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data, ensure_ascii=False)}。返回纯JSON：{{'trades':[], 'thought':'中文研判', 'learning':'演化记忆'}}"
             
-            r = gen_client.models.generate_content(model=ACTIVE_MODEL, contents=prompt, config={'response_mime_type': 'application/json'})
+            # 强制使用 2.0 模型
+            r = gen_client.models.generate_content(
+                model=ACTIVE_MODEL, 
+                contents=prompt, 
+                config={'response_mime_type': 'application/json'}
+            )
             decision = json.loads(r.text)
 
-            # 资产执行
+            # 执行结算
             nb, np, reports = float(d['balance']), (d.get('positions', {}) or {}).copy(), []
             for t in decision.get('trades', []):
                 sym, qty, act = t.get('ticker', t.get('symbol', '')), t.get('qty', 0), t.get('action', '').upper()
@@ -109,22 +101,24 @@ def run_evolution(d):
                     if np[sym] <= 0: del np[sym]
                     reports.append(f"🔴卖出 {sym} @{px}")
 
-            # 评估与同步
+            # 同步蜂房
             mv = 0.0
             for s, q in np.items(): mv += q * fetch_nectar(s, False)['现价'] * (100 if "O:" in s else 1)
             
-            log_str = f"[{datetime.now().strftime('%H:%M:%S')}] {(' | '.join(reports) if reports else '观望')} | 🧠[{ACTIVE_MODEL}] {decision.get('thought','')}"
+            log_str = f"[{datetime.now().strftime('%H:%M:%S')}] {(' | '.join(reports) if reports else '观望')} | 🧠 {decision.get('thought','')}"
             supabase.table("drones").update({"balance": nb, "positions": np, "total_assets": round(nb + mv, 2), "logs": ([log_str] + (d.get('logs') or []))[:20], "patrol_count": (int(d.get('patrol_count') or 0)) + 1, "memory": decision.get('learning', d.get('memory'))}).eq("id", d["id"]).execute()
             
-            status.update(label=f"✅ 演化完成 (耗时: {time.time()-t_start:.2f}s)", state="complete")
+            status.update(label=f"✅ 任务完成 (耗时: {time.time()-t_start:.2f}s)", state="complete")
             return True
         except Exception as e:
-            status.update(label=f"❌ 运行崩溃: {str(e)}", state="error"); return False
+            status.update(label=f"❌ 神经元异常: {str(e)}", state="error"); return False
 
-# --- 4. UI 渲染 ---
+# --- 4. UI 界面 ---
 st.set_page_config(page_title="Hive 蜂群生态", layout="wide")
 st.title("🐝 Hive 蜂群生态系统")
-st.info(f"🧬 **神经中枢已锚定最强大脑:** `{ACTIVE_MODEL}` (实测握手成功)")
+
+# 强制显示锁定的 2.0 大脑
+st.warning(f"🧬 **神经中枢已强制锁定 2.0 旗舰大脑:** `{ACTIVE_MODEL}`")
 
 d_res = supabase.table("drones").select("*").order("created_at", desc=True).execute().data
 col_t, col_btn = st.columns([3, 1])
@@ -140,7 +134,7 @@ with tabs[0]:
     for d in (d_res or []):
         with st.expander(f"🐝 {d['name']} | 总资产: ${d.get('total_assets', 0):,.2f}"):
             c1, c2, c3 = st.columns(3)
-            c1.info(f"🎭 性格: {d['persona']}"); c2.info(f"🧬 逻辑: {d['logic']}"); c3.info(f"💾 记忆: {d['memory']}")
+            c1.info(f"🎭 **性格基因**\n\n{d['persona']}"); c2.info(f"🧬 **逻辑蓝图**\n\n{d['logic']}"); c3.info(f"💾 **演化记忆**\n\n{d['memory']}")
             if st.button(f"🚀 立即放飞", key=f"run_{d['id']}"):
                 run_evolution(d); st.rerun()
             st.metric("可用现金", f"${d['balance']:,.2f}")
@@ -153,7 +147,7 @@ with tabs[1]:
         p = f"设计JSON：{{'name':'','logic':'','persona':'','portfolio':['GLD']}}。内容中文。指令：{instr}"
         r = gen_client.models.generate_content(model=ACTIVE_MODEL, contents=p, config={'response_mime_type': 'application/json'})
         item = json.loads(r.text)
-        item.update({"balance": 100000.0, "total_assets": 100000.0, "created_at": datetime.now(timezone.utc).isoformat(), "logs": ["诞生"], "positions": {}})
+        item.update({"balance": 100000.0, "total_assets": 100000.0, "created_at": datetime.now(timezone.utc).isoformat(), "logs": ["已诞生"], "positions": {}})
         supabase.table("drones").insert(item).execute(); st.rerun()
 
 with tabs[2]:
