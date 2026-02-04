@@ -7,9 +7,9 @@ from google import genai
 from polygon import RESTClient
 
 # ==========================================
-# 1. 样式与初始化
+# 1. 初始化与样式 (鹰眼审计版)
 # ==========================================
-VERSION = "v14.7 (Pure Chinese Logic)"
+VERSION = "v14.9 (Full Specs Edition)"
 st.set_page_config(page_title="虎之眼智能金融审计", layout="wide")
 
 st.markdown("""
@@ -18,6 +18,7 @@ st.markdown("""
     .data-block { color: #003366; font-weight: bold; font-family: monospace; font-size: 0.9rem; margin-top: 5px; border-bottom: 2px solid #1a73e8; padding-bottom: 3px; }
     .thought-block { font-size: 0.9rem; color: #333; background: #f4f6f8; padding: 12px; border-radius: 8px; border-left: 4px solid #ccd; margin: 8px 0; line-height: 1.5; white-space: pre-wrap; }
     .action-block { color: #d93025; font-weight: bold; font-size: 0.9rem; margin-top: 5px; background: #fff5f5; padding: 5px; border-radius: 4px; }
+    .dna-tag { background-color: #e8f0fe; color: #1967d2; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; margin-right: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -47,7 +48,7 @@ def get_verified_price(poly, ticker):
     except: return 0.0
 
 # ==========================================
-# 2. 决策逻辑 (强制中文输出)
+# 2. 决策逻辑
 # ==========================================
 def execute_flight(d_id, clients, is_auto=False):
     try:
@@ -62,18 +63,7 @@ def execute_flight(d_id, clients, is_auto=False):
         nav = cash + mv_total
 
         tag = "[自动托管] " if is_auto else ""
-        
-        # 🚨 强制中文 Prompt 指令
-        prompt = f"""你是{d['name']}。性格DNA:{d.get('style')}。
-        🚨 环境底稿：
-        - 初始本金: $100,000 | 当前净值(NAV): ${nav:,.2f}
-        - {tk}现价: ${curr_p:.2f} | 现金: ${cash:,.2f} | 持仓估值: ${mv_total:,.2f}
-        - 详细持仓: {json.dumps(pos)}
-
-        要求: 
-        1. 必须使用简体中文进行思考和描述。
-        2. 严格按 JSON 返回：{{ "thought": "中文思考逻辑", "trades": [{{ "ticker": "代码", "qty": 数量, "action": "BUY/SELL" }}] }}
-        """
+        prompt = f"你是{d['name']}。DNA性格:{d.get('style')}。NAV ${nav:,.2f}, GLD ${curr_p:.2f}, 持仓:{json.dumps(pos)}。要求中文思考，按JSON返回。"
         
         r = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=prompt, config={'response_mime_type': 'application/json'})
         res = json.loads(r.text)
@@ -86,7 +76,6 @@ def execute_flight(d_id, clients, is_auto=False):
             px = get_verified_price(clients['poly'], sym)
             if px <= 0: continue
             cost = px * qty * (100 if "O:" in sym else 1)
-            
             if act == 'BUY' and nb >= cost:
                 nb -= cost; np[sym] = np.get(sym, 0) + qty
                 exec_logs.append(f"买入 {qty}手 {sym} @${px:.2f}")
@@ -95,14 +84,7 @@ def execute_flight(d_id, clients, is_auto=False):
                 if np[sym] <= 0: del np[sym]
                 exec_logs.append(f"卖出 {qty}手 {sym} @${px:.2f}")
 
-        # 构造审计日志
-        data_line = f"📊 {tk}:${curr_p:.2f} | NAV:${nav:,.2f} | 现金:${cash:,.2f} | 持仓:${mv_total:,.2f}"
-        log_entry = (
-            f"🕒 {tag}{now_tag} || "
-            f"{data_line} || "
-            f"🧠 思考: {res.get('thought')} || "
-            f"⚡ 行动: {(' | '.join(exec_logs) if exec_logs else '持仓观望')}"
-        )
+        log_entry = f"🕒 {tag}{now_tag} || 📊 {tk}:${curr_p:.2f} | NAV:${nav:,.2f} | 现金:${cash:,.2f} | 持仓:${mv_total:,.2f} || 🧠 思考: {res.get('thought')} || ⚡ 行动: {(' | '.join(exec_logs) if exec_logs else '观望')}"
         
         clients['supabase'].table("drones").update({
             "balance": nb, "positions": np, 
@@ -110,9 +92,7 @@ def execute_flight(d_id, clients, is_auto=False):
             "logs": ([log_entry] + (d.get('logs') or []))[:100]
         }).eq("id", d_id).execute()
         return True
-    except Exception as e:
-        st.error(f"研判异常: {e}")
-        return False
+    except: return False
 
 # ==========================================
 # 3. 界面渲染
@@ -126,50 +106,60 @@ d_res = clients['supabase'].table("drones").select("*").order("created_at", desc
 for d in d_res:
     with st.container(border=True):
         h_l, h_r = st.columns([5, 1])
-        h_l.subheader(f"🐝 {d['name']} | 虎之眼审计看板")
+        h_l.subheader(f"🐝 {d['name']} | 虎之眼审计监控")
         if h_r.button(f"🚀 放飞研判", key=f"f_{d['id']}", type="primary", use_container_width=True):
             if execute_flight(d['id'], clients):
-                st.cache_data.clear()
-                st.rerun()
+                st.cache_data.clear(); st.rerun()
 
-        # Metrics (现金/持仓/NAV)
+        # Metrics 网格
         cash, pos = float(d.get('balance', 0.0)), d.get('positions', {})
-        mv_total = sum([get_verified_price(clients['poly'], s) * q * 100 for s, q in pos.items()])
+        mv_total, pos_table = 0.0, []
+        for sym, qty in pos.items():
+            px = get_verified_price(clients['poly'], sym)
+            mv = px * qty * (100 if "O:" in sym else 1)
+            mv_total += mv
+            pos_table.append({"代码": sym, "持仓": f"{qty}手", "单价": f"${px:.2f}", "估值": f"${mv:,.2f}"})
+
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("现金", f"${cash:,.2f}")
         m2.metric("持仓市值", f"${mv_total:,.2f}")
         m3.metric("NAV (总资产)", f"${cash+mv_total:,.2f}", delta=f"{((cash+mv_total)/100000-1)*100:.2f}%")
-        m4.metric("审计深度", f"{len(d.get('logs') or [])}")
+        m4.metric("审计条数", f"{len(d.get('logs') or [])}")
+
+        st.divider()
+
+        # 🚨 找回的 DNA 和 持仓明细
+        c1, c2 = st.columns([1, 2.5])
+        with c1:
+            st.write("🧬 **DNA 片段**")
+            dna_list = d.get('style', '').split(' | ')
+            for frag in dna_list:
+                st.markdown(f'<span class="dna-tag">{frag}</span>', unsafe_allow_html=True)
+                st.write("")
+        
+        with c2:
+            st.write("📦 **实时投资组合 (Portfolio)**")
+            if pos_table:
+                st.dataframe(pd.DataFrame(pos_table), hide_index=True, use_container_width=True)
+            else:
+                st.caption("空仓")
 
         st.divider()
         st.write("🧠 **三维度审计记忆 (Data / Thought / Action)**")
-        
-        logs = d.get('logs', [])
-        for log in logs[:20]:
+        for log in (d.get('logs', []))[:15]:
             with st.chat_message("assistant", avatar="🐝"):
-                # 兼容性解析
-                parts = log.split(" || ") if " || " in log else log.split(" | ")
+                parts = log.split(" || ")
                 if len(parts) >= 3:
-                    st.markdown(f'<span class="time-tag">{parts[0]}</span>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="data-block">{parts[1]}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="thought-block">{parts[2].replace("🧠 思考:", "").strip()}</div>', unsafe_allow_html=True)
-                    if len(parts) > 3:
-                        st.markdown(f'<div class="action-block">{parts[3]}</div>', unsafe_allow_html=True)
-                else:
-                    st.info(log)
+                    st.markdown(f'<span class="time-tag">{parts[0]}</span><div class="data-block">{parts[1]}</div><div class="thought-block">{parts[2].replace("🧠 思考:", "").strip()}</div><div class="action-block">{parts[3]}</div>', unsafe_allow_html=True)
 
-# --- 托管逻辑 ---
+# --- 托管中心 ---
 if auto_mode and d_res:
-    target_id = d_res[0]['id']
     if "last_auto_run" not in st.session_state: st.session_state.last_auto_run = 0
     now = time.time()
     if now - st.session_state.last_auto_run > 300:
-        execute_flight(target_id, clients, is_auto=True)
+        execute_flight(d_res[0]['id'], clients, is_auto=True)
         st.session_state.last_auto_run = now
-        st.cache_data.clear()
-        st.rerun()
+        st.cache_data.clear(); st.rerun()
     else:
-        remaining = int(300 - (now - st.session_state.last_auto_run))
-        st.sidebar.metric("下次研判倒计时", f"{remaining} 秒")
-        time.sleep(2)
-        st.rerun()
+        st.sidebar.metric("下次自动巡逻", f"{int(300 - (now - st.session_state.last_auto_run))} 秒")
+        time.sleep(2); st.rerun()
