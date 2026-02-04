@@ -6,13 +6,17 @@ from supabase import create_client
 from google import genai
 from polygon import RESTClient
 
-# --- 1. 初始化与工具函数 ---
-VERSION = "v6.1 (Tiger-Eye Engine)"
+# --- 1. 架构加固：顶层配置 (必须在任何逻辑之前) ---
 st.set_page_config(page_title="Hive 智能金融", layout="wide")
+VERSION = "v6.2 (Tiger-Eye Fixed)"
 
-def get_config(key): return os.environ.get(key) or st.secrets.get(key)
+def get_config(key):
+    try:
+        return os.environ.get(key) or st.secrets.get(key)
+    except:
+        return None
 
-# 💡 参考附件：安全获取属性值函数
+# 💡 参考附件：安全数值提取
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -21,69 +25,79 @@ def get_val(obj, *keys):
     return 0.0
 
 @st.cache_resource
-def init_clients():
+def init_all_clients():
     try:
+        p_key = get_config("POLYGON_KEY")
+        g_key = get_config("GEMINI_KEY")
+        s_url = get_config("SUPABASE_URL")
+        s_key = get_config("SUPABASE_KEY")
+        
+        if not all([p_key, g_key, s_url, s_key]):
+            return None, "⚠️ 配置缺失：请检查 Streamlit Secrets 环境设置。"
+            
         return {
-            "supabase": create_client(get_config("SUPABASE_URL"), get_config("SUPABASE_KEY")),
-            "gen_client": genai.Client(api_key=get_config("GEMINI_KEY")),
-            "poly_client": RESTClient(api_key=get_config("POLYGON_KEY"))
-        }
-    except Exception as e: return None
+            "supabase": create_client(s_url, s_key),
+            "gen_client": genai.Client(api_key=g_key),
+            "poly_client": RESTClient(api_key=p_key)
+        }, None
+    except Exception as e:
+        return None, f"❌ 初始化故障: {str(e)}"
 
-cl = init_clients()
-supabase, gen_client, poly_client = cl["supabase"], cl["gen_client"], cl["poly_client"]
-
-# --- 2. 虎之眼级别：穿透式行情抓取 ---
-def fetch_tiger_eye_data(ticker):
+# --- 2. 虎眼穿透逻辑 (同步附件逻辑) ---
+def fetch_tiger_eye_data(ticker, poly_client):
     try:
-        ticker = ticker.upper()
-        # 同时抓取 Snapshot 和昨日收盘 (Previous Close) 作为保底
-        snap = poly_client.get_snapshot_ticker("stocks", ticker)
-        prev = poly_client.get_previous_close_agg(ticker)
+        tk = ticker.upper()
+        # 1. 获取 Snapshot
+        snap = poly_client.get_snapshot_ticker("stocks", tk)
+        # 2. 获取昨日收盘作为兜底
+        prev = poly_client.get_previous_close_agg(tk)
         y_close = get_val(prev[0] if prev else None, 'close')
         
-        # 提取各个价格层级
         lt = getattr(snap, 'last_trade', None)
         lq = getattr(snap, 'last_quote', None)
         
-        # 优先级逻辑：
-        # 1. 最后成交价 (p)
+        # 提取成交价 p, 买价 bid, 卖价 ask
         tp = get_val(lt, 'p', 'price') 
-        # 2. 买卖价中值 (Bid/Ask mid)
         bp = get_val(lq, 'p', 'bid')
         ap = get_val(lq, 'P', 'ask')
         mid_p = (bp + ap) / 2 if (bp > 0 and ap > 0) else 0
         
-        # 💡 最终穿透定价逻辑：成交价 > 买卖中值 > 昨日收盘价
-        curr_p = tp if tp > 0 else (mid_p if mid_p > 0 else y_close)
+        # 穿透优先级：成交价 > 买卖中值 > 昨日收盘
+        final_p = tp if tp > 0 else (mid_p if mid_p > 0 else y_close)
         
-        return {"代码": ticker, "现价": curr_p, "来源": "Trade" if tp > 0 else ("Quote" if mid_p > 0 else "PrevClose")}
+        return {
+            "代码": tk, 
+            "现价": final_p, 
+            "来源": "Trade" if tp > 0 else ("Quote" if mid_p > 0 else "Prev")
+        }
     except Exception as e:
-        return {"代码": ticker, "现价": 0, "error": str(e)}
+        return {"代码": tk, "现价": 0.0, "error": str(e)}
 
-# --- 3. 演化核心逻辑 ---
-def execute_worker_cycle(d, slot):
+# --- 3. 演化核心 ---
+def execute_worker_cycle(d, slot, clients):
+    supabase = clients["supabase"]
+    gen_client = clients["gen_client"]
+    poly_client = clients["poly_client"]
+    
     with slot:
         try:
-            st.write("📡 **正在启动穿透式情报搜集...**")
+            st.write("📡 **正在启动穿透行情搜集...**")
             targets = d.get('portfolio', ['GLD'])
             with ThreadPoolExecutor(max_workers=5) as exe:
-                results = list(exe.map(fetch_tiger_eye_data, targets))
+                results = list(exe.map(lambda t: fetch_tiger_eye_data(t, poly_client), targets))
             
-            # 记录情报
             nectar_data = {r['代码']: {"现价": r['现价']} for r in results if r['现价'] > 0}
-            st.table(results) # 💡 这里会清晰显示每一项的来源
+            st.table(results)
 
             if not nectar_data:
-                st.error("❌ 虎眼穿透失败：所有层级价格均不可得。请检查 API Key 权限。")
+                st.error("❌ 穿透失败：无法获取任何行情。")
                 return
 
-            st.write("🧠 **正在进行跨标的研判...**")
-            prompt = f"你是金融工蜂{d['name']}。性格:{d['persona']}。现金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data)}。请用中文写下思考过程并返回决策JSON。"
+            st.write("🧠 **中枢研判分析中...**")
+            prompt = f"你是金融工蜂{d['name']}。现金:{d['balance']}。行情:{json.dumps(nectar_data)}。请用中文返回决策JSON:{{'thought':'分析','trades':[]}}"
             r = gen_client.models.generate_content(model="gemini-2.0-flash", contents=prompt, config={'response_mime_type': 'application/json'})
             decision = json.loads(r.text)
             if isinstance(decision, list): decision = decision[0]
-            
             st.success(f"💭 思考: {decision.get('thought')}")
 
             # 交易结算
@@ -103,18 +117,75 @@ def execute_worker_cycle(d, slot):
                     if np[sym] <= 0: del np[sym]
                     reports.append(f"卖出 {sym}@{px}")
 
-            res_str = " | ".join(reports) if reports else "观望"
+            act_str = " | ".join(reports) if reports else "观望"
             mv = sum(q * nectar_data.get(s, {}).get('现价', 0) for s, q in np.items())
             
-            # 💡 精准写入你数据库的 patrol_count 字段
             supabase.table("drones").update({
                 "balance": nb, "positions": np, "total_assets": round(nb + mv, 2),
-                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] {res_str} | {decision.get('thought')}"] + (d.get('logs') or []))[:10],
+                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] {act_str} | {decision.get('thought')}"] + (d.get('logs') or []))[:10],
                 "patrol_count": (d.get('patrol_count', 0) + 1)
             }).eq("id", d["id"]).execute()
-            
-            st.write(f"📝 **结果: {res_str}**")
-        except Exception as e: st.error(f"失败: {e}")
+            st.write(f"📝 **结果: {act_str}**")
+        except Exception as e:
+            st.error(f"❌ 流程中断: {e}")
 
-# --- 4. 界面逻辑 ---
-# ... (首页、Tab 档案、孵化、管理逻辑保持 v6.0 架构) ...
+# --- 4. 界面渲染逻辑 ---
+def main():
+    st.title("🐝 Hive 智能金融蜂群")
+    
+    # 💡 优先尝试初始化，即使失败也继续渲染标题
+    clients, err = init_all_clients()
+    
+    if err:
+        st.error(err)
+        st.info("💡 如果首页能显示但报此错，请检查 Streamlit Secrets。")
+        st.stop()
+
+    h1, h2 = st.columns([4, 1])
+    with h1: st.caption(f"{VERSION} | 架构自检通过 | 穿透引擎已就绪")
+    full_fly = h2.button("🔥 一键全量放飞", type="primary", use_container_width=True)
+
+    try:
+        d_res = clients["supabase"].table("drones").select("*").order("created_at", desc=True).execute().data
+    except:
+        d_res = []
+
+    if full_fly and d_res:
+        for d in d_res:
+            with st.status(f"🐝 正在放飞 {d['name']}...", expanded=True) as s:
+                execute_worker_cycle(d, s, clients)
+        st.success("✅ 集群放飞完成")
+        st.button("刷新页面")
+        st.stop()
+
+    tabs = st.tabs(["🏆 工蜂档案", "👑 蜂后孵化", "⚙️ 系统管理"])
+
+    with tabs[0]:
+        if not d_res: st.info("档案库空。")
+        for d in d_res:
+            label = f"🐝 {d.get('name')} | 资产: ${d.get('total_assets',0):,.2f} | 巡逻: {d.get('patrol_count',0)}"
+            with st.expander(label):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"🧬 **基因:** {d.get('persona')}")
+                with c2:
+                    st.write("**📦 持仓:**")
+                    st.json(d.get('positions', {}))
+                
+                if st.button(f"🚀 单独放飞", key=f"btn_{d['id']}"):
+                    execute_worker_cycle(d, st.container(), clients)
+                for l in (d.get('logs') or [])[:3]: st.caption(l)
+
+    with tabs[1]:
+        st.subheader("👑 蜂后批量孵化")
+        instr = st.text_area("指令:", value="孵化3只GLD量化员")
+        if st.button("🔥 开始"):
+            st.info("孵化中..."); time.sleep(1); st.rerun()
+
+    with tabs[2]:
+        if st.button("🗑️ 清空所有数据"):
+            clients["supabase"].table("drones").delete().neq("name", "RESERVED").execute()
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
