@@ -1,11 +1,11 @@
 import streamlit as st
 
-# --- 1. 全局常量 ---
-VERSION = "v9.5 (Core Metrics Dashboard)"
+# --- 1. 全局配置 ---
+VERSION = "v9.6 (Hard Execution)"
 st.set_page_config(page_title="Hive 智能金融", layout="wide")
 st.title("🐝 Hive 智能金融蜂群")
 
-import json, time, os, random, pytz
+import json, time, os, random
 import pandas as pd
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +13,7 @@ from supabase import create_client
 from google import genai 
 from polygon import RESTClient
 
-# --- 2. 核心工具 (保持虎眼穿透逻辑) ---
+# --- 2. 核心工具 ---
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -57,12 +57,12 @@ def fetch_tiger_intel(ticker, poly):
         return {"ticker": tk, "price": curr_p, "df": pd.DataFrame(rows) if rows else pd.DataFrame()}
     except: return {"ticker": ticker, "price": 0.0, "df": pd.DataFrame()}
 
-# --- 3. 放飞与结算引擎 ---
+# --- 3. 结算与放飞 ---
 def execute_flight(d, slot, clients):
     with slot:
         persona = d.get('style', '稳健交易员')
         targets = d.get('portfolio') or ['GLD']
-        st.write(f"🚀 **{d['name']} 正在扫描市场...**")
+        st.write(f"🚀 **{d['name']} 正在重塑决策逻辑...**")
         
         with ThreadPoolExecutor(max_workers=len(targets)) as exe:
             results = [exe.submit(fetch_tiger_intel, tk, clients['poly']).result() for tk in targets]
@@ -71,26 +71,34 @@ def execute_flight(d, slot, clients):
         for res in results:
             if res['price'] > 0:
                 st.subheader(f"💎 {res['ticker']} 现价: ${res['price']:.2f}")
-                st.dataframe(res['df'].head(5), use_container_width=True)
+                st.dataframe(res['df'].head(8), use_container_width=True)
                 ai_brief[res['ticker']] = {"price": res['price'], "options": res['df'].to_dict('records')}
 
-        raw_t = """你是工蜂交易员 [N]。灵魂特质: [PERSONA]。现金: [B] | 情报: [I]。
-        请进行中文分析，并在最后严格以 JSON 格式输出交易指令。
-        返回格式：{"thought": "...", "trades": [{"ticker": "代码", "qty": 数量, "action": "BUY/SELL"}]}"""
+        # 💡 强制性的 JSON 指令提示词
+        raw_t = """你是工蜂交易员 [N]。灵魂特质: [PERSONA]。
+        现金: $[B] | 情报: [I]
+        
+        ⚠️ 任务：你必须立即根据情报执行交易。
+        如果你看到机会，请在 JSON 的 trades 数组中添加 BUY 记录。
+        如果你认为风险太大，请在 thought 中说明原因并让 trades 为空。
+        
+        注意：期权合约每手代表100股，成本=现价*100。
+        必须严格返回 JSON 格式：
+        {"thought": "你的分析", "trades": [{"ticker": "具体合约代码", "qty": 1, "action": "BUY"}]}"""
         
         final_prompt = raw_t.replace("[N]", d['name']).replace("[PERSONA]", persona)\
-                             .replace("[B]", str(d['balance'])).replace("[I]", json.dumps(ai_brief, ensure_ascii=False))
+                             .replace("[B]", f"{d['balance']:,.2f}").replace("[I]", json.dumps(ai_brief, ensure_ascii=False))
         
         try:
             r = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=final_prompt, config={'response_mime_type': 'application/json'})
             decision = json.loads(r.text)
             st.success(f"💭 {d['name']} 研判:\n\n{decision.get('thought')}")
             
-            # --- 💰 结算核心 ---
             nb, np, logs = float(d.get('balance', 100000)), (d.get('positions', {}) or {}).copy(), []
             for t in decision.get('trades', []):
                 sym, qty, act = t.get('ticker','').upper(), abs(int(t.get('qty',0))), t.get('action','').upper()
                 px = 0.0
+                # 获取实时价格进行结算
                 if sym in ai_brief: px = ai_brief[sym]['price']
                 else:
                     for info in ai_brief.values():
@@ -99,24 +107,26 @@ def execute_flight(d, slot, clients):
                 
                 if px > 0 and qty > 0:
                     multiplier = 100 if (len(sym) > 6) else 1
-                    cost = px * qty * multiplier
-                    if act == 'BUY' and nb >= cost:
-                        nb -= cost; np[sym] = np.get(sym, 0) + qty; logs.append(f"买入 {qty} {sym}")
+                    total_cost = px * qty * multiplier
+                    if act == 'BUY' and nb >= total_cost:
+                        nb -= total_cost; np[sym] = np.get(sym, 0) + qty; logs.append(f"✅ 买入 {qty}手 {sym} (@{px})")
                     elif act == 'SELL' and np.get(sym, 0) >= qty:
-                        nb += cost; np[sym] -= qty
+                        nb += total_cost; np[sym] -= qty
                         if np[sym] <= 0: del np[sym]
-                        logs.append(f"卖出 {qty} {sym}")
+                        logs.append(f"❌ 卖出 {qty}手 {sym}")
 
-            # 持久化
+            if logs: st.toast("\n".join(logs))
+            else: st.info("交易员选择继续持仓/观望。")
+
             clients['supabase'].table("drones").update({
                 "balance": nb, "positions": np,
                 "patrol_count": (d.get('patrol_count', 0) + 1),
-                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] {decision.get('thought')[:50]}..."] + (d.get('logs') or []))[:10]
+                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] {decision.get('thought')[:60]}"] + (d.get('logs') or []))[:10]
             }).eq("id", d["id"]).execute()
             
-        except Exception as e: st.error(f"放飞异常: {e}")
+        except Exception as e: st.error(f"决策引擎故障: {e}")
 
-# --- 4. 界面布局与看板渲染 ---
+# --- 4. 看板渲染 ---
 cl_pkg, err = init_hive_engine()
 if err: st.error(err); st.stop()
 clients = cl_pkg
@@ -124,39 +134,35 @@ clients = cl_pkg
 try: d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
 except: d_res = []
 
-h1, h2 = st.columns([4, 1])
-if h2.button("🚀 集群全量放飞", type="primary"):
-    for d in d_res:
-        with st.status(f"🐝 调度 {d['name']}...", expanded=True):
-            execute_flight(d, st.container(), clients)
+# --- 集群放飞 ---
+if st.sidebar.button("🚀 全量集群放飞", type="primary", use_container_width=True):
+    for d in d_res: execute_flight(d, st.sidebar.empty(), clients)
     st.rerun()
 
 tabs = st.tabs(["🏆 蜂群看板", "👑 基因孵化", "⚙️ 系统管理"])
 
 with tabs[0]:
-    if not d_res: st.info("请先前往“基因孵化”创建工蜂。")
     for d in d_res:
         with st.expander(f"🐝 {d['name']} | 巡逻: {d.get('patrol_count',0)}次", expanded=True):
-            # 🚨 核心看板区
+            # 实时市值核算（这里由于没有外部行情循环，暂时以持仓记录显示，后续可扩展）
             cash = d.get('balance', 100000.0)
-            # 计算持仓资产市值 (简化处理)
-            pos_val = 0.0 # 这里可以后续接入实时行情循环计算
-            total_assets = cash + pos_val
-            
+            np = d.get('positions', {})
+            # 简化版：资产看板
             m1, m2, m3 = st.columns(3)
             m1.metric("现金 (Cash)", f"${cash:,.2f}")
-            m2.metric("持仓市值 (Market Value)", f"${pos_val:,.2f}")
-            m3.metric("总资产 (Total Assets)", f"${total_assets:,.2f}", delta=f"{total_assets-100000.0:,.2f}")
+            m2.metric("持仓合约数", f"{sum(np.values()) if np else 0} 手")
+            m3.metric("巡逻状态", "活跃" if cash > 0 else "耗尽")
 
             st.divider()
-            
             c1, c2 = st.columns([2, 1])
-            with c1:
-                st.write(f"🧬 **灵魂描述:** {d.get('style')}")
+            with c1: st.write(f"🧬 **灵魂描述:** {d.get('style')}")
             with c2:
                 st.write("**📦 当前持仓:**")
-                if d.get('positions'): st.json(d['positions'])
+                if np: st.json(np)
                 else: st.caption("暂无持仓")
             
-            if st.button(f"🚀 单独放飞 {d['name']}", key=f"f_{d['id']}"):
+            if st.button(f"🚀 放飞 {d['name']}", key=f"f_{d['id']}"):
                 execute_flight(d, st.container(), clients)
+                st.rerun()
+
+# (Tabs[1] 和 Tabs[2] 逻辑保持不变)
