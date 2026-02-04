@@ -1,11 +1,12 @@
 import streamlit as st
 
-# --- 1. 架构红线：全局常量与进化基因库 ---
-VERSION = "v9.1 (Behavioral Finance)"
-RISK_LEVELS = ["激进", "中立", "保守"]
-TIME_FRAMES = ["长线交易", "短线交易", "极短线交易"]
-INSTITUTION_MODELS = ["波动率专家", "末日博弈", "机构大单", "黄金猎手"]
-MOODS = ["🦁 贪婪", "🐰 恐惧", "⚖️ 冷静"]
+# --- 1. 全局配置与预设基因模板 ---
+VERSION = "v9.2 (Soul Compression)"
+PRESET_PERSONAS = {
+    "默认黄金猎手": "稳健的黄金专家，中立情绪，关注 GLD 现货与期权联动，追求风险对冲。",
+    "激进末日使者": "极其激进的末日博弈者，贪婪情绪，只盯着高 Gamma 合约，追求极短线翻倍爆炸机会。",
+    "稳健波动率专家": "保守的波动率专家，冷静情绪，专注于 IV 回归，长线交易，极其厌恶回撤。"
+}
 
 st.set_page_config(page_title="Hive 智能金融", layout="wide")
 st.title("🐝 Hive 智能金融蜂群")
@@ -18,7 +19,7 @@ from supabase import create_client
 from google import genai 
 from polygon import RESTClient
 
-# --- 2. 虎眼级穿透工具 ---
+# --- 2. 核心穿透工具 (保持虎眼逻辑) ---
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -62,17 +63,14 @@ def fetch_tiger_intel(ticker, poly):
         return {"ticker": tk, "price": curr_p, "df": pd.DataFrame(rows).sort_values(by="成交量", ascending=False) if rows else pd.DataFrame()}
     except: return {"ticker": ticker, "price": 0.0, "df": pd.DataFrame()}
 
-# --- 3. 演化核心：四维性格研判 ---
+# --- 3. 演化核心：语义化决策 ---
 def execute_evolution(d, slot, clients):
     with slot:
-        # 提取四维基因
-        risk = d.get('risk_level', '中立')
-        tf = d.get('time_frame', '短线交易')
-        style = d.get('style', '黄金猎手')
-        mood = d.get('mood', '⚖️ 冷静')
-
+        # 💡 这里直接读取 style 字段作为“灵魂描述”
+        persona = d.get('style', '稳健的交易员')
         targets = d.get('portfolio') or ['GLD']
-        st.write(f"📡 **{d['name']} ({mood}) 正在研判情报...**")
+        st.write(f"📡 **{d['name']} 正在研判情报...**")
+        st.caption(f"🧬 当前灵魂特质: {persona}")
         
         with ThreadPoolExecutor(max_workers=len(targets)) as exe:
             results = [exe.submit(fetch_tiger_intel, tk, clients['poly']).result() for tk in targets]
@@ -84,37 +82,32 @@ def execute_evolution(d, slot, clients):
                 st.dataframe(res['df'].head(5), use_container_width=True)
                 ai_brief[res['ticker']] = {"price": res['price'], "options": res['df'].head(5).to_dict('records')}
 
-        # 💡 四维性格化 Prompt
+        # 💡 语义压缩 Prompt
         raw_t = """
         你是工蜂交易员 [N]。
-        你的性格 DNA：
-        - 情绪状态：[MOOD]
-        - 激进程度：[RISK]
-        - 交易期限：[TF]
-        - 机构模型：[STYLE]
+        你的交易灵魂描述：[PERSONA]
         
         当前现金: [B] | 情报: [I]
         要求：
-        1. 必须以你当前的情绪倾向 [MOOD] 出发进行思考。
-        2. 如果你是贪婪的，寻找那些可能翻倍的机会；如果你是恐惧的，寻找保护和离场理由。
-        3. 返回 JSON: {"thought": "体现性格的中文分析", "trades": []}
+        1. 必须完全代入你的描述角色进行中文思考。
+        2. 如果描述说你是“贪婪”的，你的研判必须体现这种对机会的饥渴。
+        3. 返回 JSON: {"thought": "体现灵魂特质的中文分析", "trades": []}
         """
-        final_prompt = raw_t.replace("[N]", d['name']).replace("[MOOD]", mood).replace("[RISK]", risk)\
-                             .replace("[TF]", tf).replace("[STYLE]", style).replace("[B]", str(d['balance']))\
-                             .replace("[I]", json.dumps(ai_brief, ensure_ascii=False))
+        final_prompt = raw_t.replace("[N]", d['name']).replace("[PERSONA]", persona)\
+                             .replace("[B]", str(d['balance'])).replace("[I]", json.dumps(ai_brief, ensure_ascii=False))
         
         try:
             r = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=final_prompt, config={'response_mime_type': 'application/json'})
             decision = json.loads(r.text)
-            st.success(f"💭 {d['name']} ({mood}) 研判:\n\n{decision.get('thought')}")
+            st.success(f"💭 {d['name']} 研判:\n\n{decision.get('thought')}")
             
             clients['supabase'].table("drones").update({
                 "patrol_count": (d.get('patrol_count', 0) + 1),
-                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] {mood} | {decision.get('thought')}"] + (d.get('logs') or []))[:10]
+                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] {decision.get('thought')}"] + (d.get('logs') or []))[:10]
             }).eq("id", d["id"]).execute()
         except: st.error("研判中断")
 
-# --- 4. UI 渲染与基因孵化 ---
+# --- 4. UI 渲染 ---
 cl_pkg, err = init_hive_engine()
 if err: st.error(err); st.stop()
 clients = cl_pkg
@@ -122,27 +115,27 @@ clients = cl_pkg
 try: d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
 except: d_res = []
 
-# (此处省略集群放飞按钮逻辑，与 v9.0 一致)
+# (主放飞按钮逻辑略)
 
-tabs = st.tabs(["🏆 蜂群看板", "👑 基因工程", "⚙️ 系统"])
+tabs = st.tabs(["🏆 蜂群看板", "👑 灵魂孵化", "⚙️ 系统"])
 with tabs[0]:
     for d in d_res:
-        with st.expander(f"🐝 {d['name']} | {d.get('mood','-')} | {d.get('risk_level','-')}", expanded=True):
-            st.write(f"🧬 **基因链:** {d.get('style')} / {d.get('time_frame')}")
+        with st.expander(f"🐝 {d['name']} | {d.get('style','-')[:20]}...", expanded=True):
+            st.write(f"🧬 **灵魂描述:** {d.get('style')}")
             if st.button(f"🎯 唤醒并演化", key=f"f_{d['id']}"): execute_evolution(d, st.container(), clients)
 
 with tabs[1]:
-    st.subheader("👑 孵化定制化基因工蜂")
-    name = st.text_input("工蜂名:", f"AI-{random.randint(100,999)}")
-    c1, c2 = st.columns(2)
-    g_risk = c1.select_slider("激进程度:", options=RISK_LEVELS, value="中立")
-    g_mood = c2.selectbox("情绪倾向:", MOODS)
-    c3, c4 = st.columns(2)
-    g_tf = c3.selectbox("交易期限:", TIME_FRAMES)
-    g_style = c4.selectbox("机构模型:", INSTITUTION_MODELS)
+    st.subheader("👑 灵魂工程：自然语言孵化工蜂")
+    name = st.text_input("工蜂代号:", f"AI-{random.randint(100,999)}")
     
-    if st.button("🔥 立即注入 DNA 并孵化"):
+    # 💡 增加预设模板选择
+    preset = st.selectbox("选择灵魂模板 (或在下方自定义):", ["自定义"] + list(PRESET_PERSONAS.keys()))
+    default_text = PRESET_PERSONAS.get(preset, "") if preset != "自定义" else ""
+    
+    persona_text = st.text_area("在此输入工蜂的灵魂描述（包含激进程度、情绪、模型偏好等）:", value=default_text)
+    
+    if st.button("🔥 注入灵魂并孵化"):
         clients['supabase'].table("drones").insert({
-            "name": name, "risk_level": g_risk, "mood": g_mood, "time_frame": g_tf, "style": g_style,
+            "name": name, "style": persona_text,
             "balance": 100000.0, "total_assets": 100000.0, "portfolio": ["GLD"], "positions": {}
         }).execute(); st.rerun()
