@@ -6,10 +6,10 @@ from google import genai
 from polygon import RESTClient
 
 # ==========================================
-# 1. 核心初始化 (复刻虎之眼底层架构)
+# 1. 初始化与配置 (复刻虎之眼底层逻辑)
 # ==========================================
-VERSION = "v12.1 (Full-Audit Edition)"
-st.set_page_config(page_title="Hive 智能金融", layout="wide")
+VERSION = "v12.3 (Tiger Eye Logic Fusion)"
+st.set_page_config(page_title="Hive 智能金融蜂群", layout="wide")
 
 @st.cache_resource
 def init_hive_engine():
@@ -25,6 +25,7 @@ cl_pkg, err = init_hive_engine()
 if err: st.error(err); st.stop()
 clients = cl_pkg
 
+# --- 虎之眼专用取值工具 ---
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -33,33 +34,38 @@ def get_val(obj, *keys):
     return 0.0
 
 # ==========================================
-# 2. 🚨 核心：复刻虎之眼 v6.3.1 取价逻辑 (修复 0 价格)
+# 2. 🚨 核心修复：复刻虎之眼 v6.3.1 穿透逻辑 (修复 0 价格)
 # ==========================================
 def get_verified_price(poly, ticker):
     try:
-        # 判断是期权合约还是股票标的
-        if ticker.startswith("O:") or len(ticker) > 10:
-            # --- 期权：Aggs 分钟线回溯 ---
+        # 判断是期权合约还是股票标的 (核心修复点)
+        is_option = ticker.startswith("O:") or len(ticker) > 10
+        
+        if not is_option:
+            # --- 股票路径：对齐虎之眼 v6.3.1 穿透逻辑 ---
+            snap = poly.get_snapshot_ticker("stocks", ticker)
+            prev = poly.get_previous_close_agg(ticker)
+            y_close = get_val(prev[0] if prev else None, 'close')
+            
+            lt, lq = getattr(snap, 'last_trade', None), getattr(snap, 'last_quote', None)
+            tp = get_val(lt, 'p', 'price') # 实时成交价
+            bp = get_val(lq, 'p', 'bid')   # 买入报价
+            ap = get_val(lq, 'P', 'ask')   # 卖出报价
+            
+            # 优先级: 实时成交价 > 买卖价中值 > 昨日收盘价
+            curr_p = tp if tp > 0 else (((bp + ap) / 2) if (bp > 0 and ap > 0) else y_close)
+            return curr_p
+        else:
+            # --- 期权路径：Aggs 分钟线回溯 (过滤 0 成交量) ---
             end = datetime.now()
             start = end - timedelta(days=5)
             aggs = poly.get_aggs(ticker, 1, "minute", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
             if aggs:
                 for i in range(len(aggs)-1, -1, -1):
                     if aggs[i].volume > 0: return float(aggs[i].close)
+            # 兜底：昨日收盘
             prev = poly.get_previous_close_agg(ticker)
             return float(prev[0].close) if prev else 0.0
-        else:
-            # --- 股票：Snapshot 实时快照 (虎之眼核心) ---
-            snap = poly.get_snapshot_ticker("stocks", ticker)
-            prev = poly.get_previous_close_agg(ticker)
-            y_close = get_val(prev[0] if prev else None, 'close')
-            
-            lt, lq = getattr(snap, 'last_trade', None), getattr(snap, 'last_quote', None)
-            tp = get_val(lt, 'p', 'price')
-            bp, ap = get_val(lq, 'p', 'bid'), get_val(lq, 'P', 'ask')
-            
-            # 优先级: 实时成交 > 买卖中值 > 昨日收盘
-            return tp if tp > 0 else (((bp + ap) / 2) if (bp > 0 and ap > 0) else y_close)
     except:
         return 0.0
 
@@ -79,20 +85,20 @@ def execute_flight_v12(d, slot, clients):
     with slot:
         dna = d.get('style', 'Risk:Neutral')
         history = (d.get('logs') or [])[:3]
-        tk = "GLD"
+        tk = "GLD" 
         curr_p = get_verified_price(clients['poly'], tk)
         
-        st.write(f"🚀 **{d['name']} 正在进行深度审计研判...**")
+        st.write(f"🚀 **{d['name']} 正在提取 DNA 并进行三维度审计研判...**")
         
         prompt = f"""你是交易工蜂 {d['name']}。
         🧬 DNA特征: {dna} | 🧠 记忆: {history}
-        当前数据: 现金 ${d['balance']:,.2f}, 持仓 {json.dumps(d.get('positions'))}, {tk}现价 ${curr_p}
+        当前数据: 现金 ${d['balance']:,.2f}, 持仓 {json.dumps(d.get('positions'))}, {tk}实时价 ${curr_p}
         
-        请严格按 JSON 返回：
+        请严格按 JSON 格式返回：
         {{
-          "data_report": "记录关键价格和异动",
-          "thought": "基于DNA和记忆的思考过程",
-          "action_plan": "具体操作逻辑",
+          "data_report": "记录关键价格数据",
+          "thought": "你的思考逻辑",
+          "action_plan": "具体行动说明",
           "trades": [{{"ticker": "O:...", "qty": 10, "action": "BUY/SELL"}}]
         }}
         """
@@ -100,6 +106,7 @@ def execute_flight_v12(d, slot, clients):
             r = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=prompt, config={'response_mime_type': 'application/json'})
             res = json.loads(r.text)
             
+            # 结算逻辑
             nb, np = float(d['balance']), (d.get('positions') or {}).copy()
             execution = []
             for t in res.get('trades', []):
@@ -115,7 +122,7 @@ def execute_flight_v12(d, slot, clients):
                     if np[sym] <= 0: del np[sym]
                     execution.append(f"卖出 {qty}手 {sym} @${px:.2f}")
 
-            # 构造三维度标准审计日志
+            # 构造审计日志
             full_log = (
                 f"📊 数据：{res.get('data_report')} | "
                 f"🧠 思考：{res.get('thought')} | "
@@ -128,25 +135,26 @@ def execute_flight_v12(d, slot, clients):
                 "logs": ([full_log] + (d.get('logs') or []))[:20]
             }).eq("id", d["id"]).execute()
             
-            st.success(f"✅ {d['name']} 执行完毕")
+            st.success(f"✅ {d['name']} 审计任务执行完毕")
             return True
         except Exception as e:
             st.error(f"研判执行失败: {e}"); return False
 
 # ==========================================
-# 4. UI 渲染：放大版审计看板
+# 4. UI 渲染：宽屏沉浸式审计看板 (修复 AST 报错)
 # ==========================================
+st.title("🐝 Hive 智能金融蜂群")
 tabs = st.tabs(["🏆 蜂群看板", "👑 DNA 孵化器", "⚙️ 管理"])
 
 with tabs[0]:
     d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
     for d in d_res:
-        with st.expander(f"🐝 {d['name']} | 存活: {len(d.get('logs') or [])} 次巡逻", expanded=True):
+        with st.expander(f"🐝 {d['name']} | 全面审计视图", expanded=True):
             # 顶部资产 Metrics
             cash, pos = float(d.get('balance', 0.0)), d.get('positions', {})
             mv_total, pos_table = 0.0, []
             if pos:
-                with st.spinner("同步市值中..."):
+                with st.spinner("实时市值穿透..."):
                     for sym, qty in pos.items():
                         px = get_verified_price(clients['poly'], sym)
                         mv = px * qty * (100 if "O:" in sym else 1)
@@ -161,18 +169,25 @@ with tabs[0]:
 
             st.divider()
 
-            # 🧠 核心：宽屏三维度审计记忆 (放大版)
+            # --- 🧠 核心：宽屏三维度审计记忆 (修复 AST 报错) ---
             st.markdown("### 🧠 三维度审计记忆 (Data / Thought / Action)")
             with st.container(height=500, border=True):
                 logs = d.get('logs') or []
-                if not logs: st.caption("尚无记录。")
+                if not logs: st.caption("目前暂无审计记录，请点击放飞按钮。")
                 for l in logs:
                     parts = l.split(" | ")
                     with st.chat_message("assistant", avatar="🐝"):
                         for p in parts:
-                            if "📊 数据" in p: st.markdown(f"**{p}**")
-                            elif "🧠 思考" in p: st.info(p)
-                            elif "⚡ 行动" in p: st.success(p) if "买入" in p or "卖出" in p else st.warning(p)
+                            # 💡 修复点：改用标准 if-else，彻底解决 Python 3.13 语法解析报错
+                            if "📊 数据" in p:
+                                st.markdown(f"**{p}**")
+                            elif "🧠 思考" in p:
+                                st.info(p)
+                            elif "⚡ 行动" in p:
+                                if "买入" in p or "卖出" in p:
+                                    st.success(p)
+                                else:
+                                    st.warning(p)
                     st.divider()
 
             st.divider()
@@ -197,6 +212,18 @@ with tabs[0]:
             with c_pos:
                 st.write("📦 **实盘持仓**")
                 if pos_table: st.table(pos_table)
-                else: st.caption("空仓")
+                else: st.caption("空仓状态")
 
-# 孵化器与管理页面逻辑保持稳定...
+with tabs[1]:
+    st.subheader("👑 DNA 孵化器")
+    u_cmd = st.text_input("描述新蜜蜂性格:")
+    if st.button("🔥 孵化"):
+        dna_p = f"将'{u_cmd}'转化为'特征:值 | 特征:值'短语"
+        dna = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=dna_p).text.strip()
+        clients['supabase'].table("drones").insert({"name": f"AI-{random.randint(100,999)}", "style": dna, "balance": 100000.0, "positions": {}}).execute()
+        st.rerun()
+
+with tabs[2]:
+    if st.button("🗑️ 清空所有工蜂"):
+        clients['supabase'].table("drones").delete().neq("name", "RESERVED").execute()
+        st.rerun()
