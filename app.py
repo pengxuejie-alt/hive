@@ -1,14 +1,14 @@
 import streamlit as st
-import re, json, time, os, random
+import json, time, os, random
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from supabase import create_client
 from google import genai
 from polygon import RESTClient
 
-# --- 1. 核心初始化 (补全所有基础变量) ---
-VERSION = "v5.7 (Fixed)"  # 💡 补全被漏掉的变量
-st.set_page_config(page_title="Hive 金融蜂群", layout="wide")
+# --- 1. 配置 ---
+VERSION = "v5.9.1 (Field Alignment)"
+st.set_page_config(page_title="Hive 智能金融", layout="wide")
 st.title("🐝 Hive 智能金融蜂群")
 
 def get_config(key): return os.environ.get(key) or st.secrets.get(key)
@@ -23,132 +23,108 @@ def init_clients():
         }
     except: return None
 
-clients = init_clients()
-if not clients: st.error("❌ 环境配置读取失败，请检查 Secrets"); st.stop()
+cl = init_clients()
+supabase, gen_client, poly_client = cl["supabase"], cl["gen_client"], cl["poly_client"]
 
-supabase = clients["supabase"]
-gen_client = clients["gen_client"]
-poly_client = clients["poly_client"]
+# --- 2. 演化核心 (参数对齐版) ---
+def fetch_detailed_nectar(ticker):
+    try:
+        ticker = ticker.upper()
+        # 💡 调用 Snapshot 接口
+        sn = poly_client.get_snapshot_ticker("stocks", ticker)
+        
+        # 调试信息：获取对象所有可用属性
+        available_attrs = dir(sn)
+        
+        # 💡 Polygon 字段对齐逻辑 (重点修正)
+        # 1. day 对象中的当前价格 (c: close)
+        day_price = getattr(sn.day, 'c', 0) if hasattr(sn, 'day') and sn.day else 0
+        # 2. last_trade 对象中的价格 (p: price)
+        last_trade_price = getattr(sn.last_trade, 'p', 0) if hasattr(sn, 'last_trade') and sn.last_trade else 0
+        # 3. prev_day 对象中的价格 (c: close)
+        prev_price = getattr(sn.prev_day, 'c', 0) if hasattr(sn, 'prev_day') and sn.prev_day else 0
+        
+        final_px = day_price or last_trade_price or prev_price
+        
+        return {
+            "代码": ticker,
+            "当日现价(day.c)": day_price,
+            "最后成交(last_trade.p)": last_trade_price,
+            "昨日价格(prev_day.c)": prev_price,
+            "最终选定": final_px,
+            "原始属性清单": [a for a in available_attrs if not a.startswith('_')]
+        }
+    except Exception as e:
+        return {"代码": ticker, "错误": str(e), "最终选定": 0}
 
-# --- 2. 演化核心逻辑 (修正版：三步透明化) ---
 def execute_worker_cycle(d, slot):
     with slot:
         try:
-            # 第一步：情报
-            st.write("🔍 **情报搜集：正在读取实时股价...**")
+            st.write("📡 **第一步：行情穿透检索 (API 参数自检)...**")
             targets = d.get('portfolio', ['GLD'])
-            def fetch_px(t):
-                try:
-                    sn = poly_client.get_snapshot_ticker("stocks", t)
-                    px = getattr(sn, 'price', 0) or getattr(sn.last_trade, 'p', 0)
-                    return {"代码": t, "现价": px}
-                except: return {"代码": t, "现价": 0}
             
             with ThreadPoolExecutor(max_workers=5) as exe:
-                results = list(exe.map(fetch_px, targets))
-            nectar_data = {r['代码']: r for r in results if r['现价'] > 0}
-            st.info(f"📈 实时行情汇总：{json.dumps(nectar_data, ensure_ascii=False)}")
+                raw_results = list(exe.map(fetch_detailed_nectar, targets))
+            
+            # 💡 强制显示 API 每一层级读取到的数据
+            st.write("📥 **行情对齐详情:**")
+            st.table(raw_results)
+            
+            nectar_data = {r['代码']: {"现价": r['最终选定']} for r in raw_results if r['最终选定'] > 0}
+            
+            if not nectar_data:
+                st.error("❌ 严重错误：未读取到有效行情。请核对上表中的字段是否有值。")
+                return
 
-            # 第二步：研判
-            st.write("🧠 **研判分析：中枢神经逻辑运算...**")
-            prompt = f"你是金融工蜂{d['name']}。性格:{d['persona']}。现金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data)}。请用中文返回JSON:{{'thought':'分析','trades':[],'learning':'经验'}}"
+            # --- 第二步：研判 ---
+            st.write("🧠 **第二步：中枢研判分析...**")
+            prompt = f"你是金融工蜂{d['name']}。行情:{json.dumps(nectar_data)}。请用中文返回决策JSON:{{'thought':'分析','trades':[]}}"
             r = gen_client.models.generate_content(model="gemini-2.0-flash", contents=prompt, config={'response_mime_type': 'application/json'})
             decision = json.loads(r.text)
             if isinstance(decision, list): decision = decision[0]
             st.success(f"💭 思考逻辑：{decision.get('thought')}")
 
-            # 第三步：交易
-            st.write("⚖️ **执行阶段：提交交易指令...**")
+            # --- 第三步：执行 ---
+            st.write("⚖️ **第三步：执行指令结算...**")
             nb, np, reports = float(d.get('balance', 100000)), (d.get('positions', {}) or {}).copy(), []
             for t in decision.get('trades', []):
-                sym, qty = t.get('ticker', '').upper(), t.get('qty', 0)
+                sym = t.get('ticker', '').upper()
                 px = nectar_data.get(sym, {}).get('现价', 0)
                 if px <= 0: continue
+                qty = t.get('qty', 0)
                 cost = qty * px * (100 if len(sym) > 6 else 1)
+                
                 if t.get('action') == 'BUY' and nb >= cost:
                     nb -= cost; np[sym] = np.get(sym, 0) + qty
-                    reports.append(f"买入 {sym}")
+                    reports.append(f"买入 {sym}@{px}")
                 elif t.get('action') == 'SELL' and np.get(sym, 0) >= qty:
                     nb += cost; np[sym] -= qty
                     if np[sym] <= 0: del np[sym]
-                    reports.append(f"卖出 {sym}")
+                    reports.append(f"卖出 {sym}@{px}")
 
             act_sum = " | ".join(reports) if reports else "观望"
-            log_msg = f"[{datetime.now().strftime('%H:%M:%S')}] 动作:{act_sum} | 思考:{decision.get('thought')}"
             mv = sum(q * nectar_data.get(s, {}).get('现价', 0) for s, q in np.items())
             
             supabase.table("drones").update({
                 "balance": nb, "positions": np, "total_assets": round(nb + mv, 2),
-                "logs": ([log_msg] + (d.get('logs') or []))[:10],
-                "memory": decision.get('learning', d.get('memory')),
+                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] 动作:{act_sum} | 思考:{decision.get('thought')}"] + (d.get('logs') or []))[:10],
                 "patrol_count": (d.get('patrol_count', 0) + 1)
             }).eq("id", d["id"]).execute()
             
-            st.write(f"📝 **结果：{act_sum}**")
-        except Exception as e: st.error(f"❌ 运行失败: {e}")
+            st.write(f"📝 **演化结果：{act_sum}**")
+        except Exception as e: st.error(f"❌ 流程崩溃: {e}")
 
-# --- 3. UI 渲染 ---
+# --- UI (全量放飞逻辑) ---
 h1, h2 = st.columns([4, 1])
-with h1: st.caption(f"{VERSION} | 纯净金融演化模式")
+with h1: st.caption(f"{VERSION} | 正在穿透：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 full_fly = h2.button("🔥 一键全量放飞", type="primary", use_container_width=True)
 
-# 💡 安全获取数据
-try:
-    d_res = supabase.table("drones").select("*").order("created_at", desc=True).execute().data
-except:
-    d_res = []
+d_res = supabase.table("drones").select("*").order("created_at", desc=True).execute().data
 
 if full_fly and d_res:
     for d in d_res:
         with st.status(f"🐝 正在放飞 {d['name']}...", expanded=True) as status:
             execute_worker_cycle(d, status)
-    st.success("✅ 集群放飞完成")
-    st.button("🔄 刷新查看状态")
+    st.success("✅ 全部放飞完成")
+    st.button("🔄 手动刷新")
     st.stop()
-
-tabs = st.tabs(["🏆 工蜂档案", "👑 蜂后孵化", "⚙️ 系统管理"])
-
-with tabs[0]:
-    if not d_res: st.info("当前蜂巢为空。")
-    for d in d_res:
-        with st.expander(f"🐝 {d.get('name')} | 资产: ${d.get('total_assets',0):,.2f} | 巡逻: {d.get('patrol_count',0)}次"):
-            c_l, c_r = st.columns(2)
-            with c_l:
-                st.write(f"🧬 **基因:** {d.get('persona')}")
-                st.write(f"🧠 **记忆:** {d.get('memory')}")
-            with c_r:
-                st.write("**📦 持仓:**"); st.json(d.get('positions', {}))
-            
-            slot = st.container()
-            if st.button(f"🚀 单独放飞", key=f"s_{d['id']}"):
-                execute_worker_cycle(d, slot)
-            for l in (d.get('logs') or [])[:3]: st.caption(l)
-
-with tabs[1]:
-    st.subheader("👑 蜂后孵化")
-    instr = st.text_area("孵化指令:", value="孵化3只量化交易员")
-    if st.button("🔥 执行"):
-        count = 1
-        m = re.search(r'(\d+)只', instr)
-        if m: count = int(m.group(1))
-        def spawn(idx):
-            p = f"设计JSON：{{'name':'','persona':'','portfolio':['GLD']}}。指令：{instr}"
-            res = gen_client.models.generate_content(model="gemini-2.0-flash", contents=p, config={'response_mime_type': 'application/json'})
-            item = json.loads(res.text)
-            if isinstance(item, list): item = item[0]
-            supabase.table("drones").insert({
-                "name": f"{item.get('name', '工蜂')}-{random.randint(100,999)}",
-                "persona": item.get('persona', '初始'),
-                "balance": 100000.0, "total_assets": 100000.0, "initial_balance": 100000.0,
-                "patrol_count": 0, "positions": {}, "logs": ["诞生"],
-                "created_at": datetime.now(timezone.utc).isoformat()
-            }).execute()
-        with ThreadPoolExecutor(max_workers=count) as exe:
-            list(exe.map(spawn, range(count)))
-        st.success("已完成"); time.sleep(1); st.rerun()
-
-with tabs[2]:
-    st.subheader("⚙️ 系统管理")
-    if st.button("🗑️ 彻底清空数据", type="secondary"):
-        supabase.table("drones").delete().neq("name", "RESERVED").execute()
-        st.rerun()
