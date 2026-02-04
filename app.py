@@ -7,9 +7,9 @@ from google import genai
 from polygon import RESTClient
 
 # ==========================================
-# 1. 初始化与样式
+# 1. 初始化
 # ==========================================
-VERSION = "v14.2 (Blackbox Persistence)"
+VERSION = "v14.3 (Hard Sync & Fix)"
 st.set_page_config(page_title="虎之眼智能金融审计", layout="wide")
 
 st.markdown("""
@@ -35,7 +35,6 @@ cl_pkg, err = init_hive_engine()
 if err: st.error(err); st.stop()
 clients = cl_pkg
 
-# --- 辅助函数 ---
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -61,28 +60,29 @@ def get_verified_price(poly, ticker):
             if aggs:
                 for i in range(len(aggs)-1, -1, -1):
                     if aggs[i].volume > 0: return float(aggs[i].close)
-            return float(poly.get_previous_close_agg(ticker)[0].close)
+            return 0.0
     except: return 0.0
 
 # ==========================================
-# 2. 核心决策逻辑
+# 2. 决策逻辑 (Hard Persistence)
 # ==========================================
 def execute_flight(d, clients, is_auto=False):
     est = pytz.timezone('US/Eastern')
     now_tag = datetime.now(est).strftime('%m-%d %H:%M:%S')
-    
     dna = d.get('style', 'Risk:Neutral')
-    # 🚨 确保读取所有历史日志，防止数组被截断
-    current_logs = d.get('logs') or []
+    
+    # 🚨 极其重要：先显式拉取最新日志，防止被缓存覆盖
+    fresh_data = clients['supabase'].table("drones").select("logs, balance, positions").eq("id", d["id"]).single().execute().data
+    current_logs = fresh_data.get('logs') or []
+    
     tk = "GLD"
     curr_p = get_verified_price(clients['poly'], tk)
-    
-    cash, pos = float(d['balance']), d.get('positions', {})
+    cash, pos = float(fresh_data['balance']), fresh_data.get('positions') or {}
     mv_total = sum([get_verified_price(clients['poly'], s) * q * 100 for s, q in pos.items()])
     nav = cash + mv_total
 
     tag = "[AUTO] " if is_auto else ""
-    prompt = f"你是{d['name']}。DNA:{dna} | 历史:{current_logs[:3]}\\n底稿: NAV ${nav:,.2f}, GLD ${curr_p:.2f}\\n持仓:{json.dumps(pos)}\\n要求按 JSON 返回 thought 和 trades。"
+    prompt = f"你是{d['name']}。NAV ${nav:,.2f}, GLD ${curr_p:.2f}, 持仓:{json.dumps(pos)}。要求按 JSON 返回 thought 和 trades。"
     
     try:
         r = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=prompt, config={'response_mime_type': 'application/json'})
@@ -106,12 +106,13 @@ def execute_flight(d, clients, is_auto=False):
 
         new_entry = f"🕒 {tag}{now_tag} || 📊 GLD:${curr_p:.2f} | NAV:${nav:,.2f} | 现金:${cash:,.2f} | 持仓:${mv_total:,.2f} || 🧠 思考: {res.get('thought')} || ⚡ 行动: {(' | '.join(exec_logs) if exec_logs else '观望')}"
         
-        # 🚨 持久化核心：将新日志压入原数组，不设过短的切片
-        updated_logs = ([new_entry] + current_logs)[:50] # 睡一晚记录 50 条足够了
+        # 🚨 数组合并逻辑锁死
+        final_logs = ([new_entry] + current_logs)[:100]
         
         clients['supabase'].table("drones").update({
-            "balance": nb, "positions": np, "patrol_count": d.get('patrol_count', 0)+1,
-            "logs": updated_logs
+            "balance": nb, "positions": np, 
+            "patrol_count": d.get('patrol_count', 0)+1,
+            "logs": final_logs
         }).eq("id", d["id"]).execute()
         return True
     except: return False
@@ -123,30 +124,31 @@ st.sidebar.title("🤖 托管中心")
 auto_mode = st.sidebar.toggle("开启 5 分钟自动托管", value=False)
 
 st.title("🐝 Hive 智能金融审计中心")
-# 🚨 实时从数据库拉取最新数据，不使用缓存
 d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
 
-if auto_mode:
-    st.sidebar.warning("托管中... 历史日志已开启最大持久化。")
-    if d_res:
-        execute_flight(d_res[0], clients, is_auto=True)
-        time.sleep(300) # 5 分钟倒计时逻辑
+if auto_mode and d_res:
+    st.sidebar.warning("托管中... 正在写入黑匣子。")
+    if execute_flight(d_res[0], clients, is_auto=True):
+        st.cache_data.clear()
+        time.sleep(300)
         st.rerun()
 
 for d in d_res:
     with st.container(border=True):
-        st.subheader(f"🐝 {d['name']} | 虎之眼审计看板")
-        # 资产网格展示... (此处省略重复的 Metric 代码以节省长度)
-        
+        st.subheader(f"🐝 {d['name']} | 资产监控")
+        # 这里显示仪表盘（省略重复代码）...
+
         st.divider()
-        st.write("🧠 **三维度审计记忆 (已开启全量追溯模式)**")
-        # 🚨 显示逻辑优化：平铺显示最近 20 条，不截断
+        st.write("🧠 **全量决策审计记忆 (Data / Thought / Action)**")
         logs = d.get('logs', [])
-        for log in logs[:20]:
+        if not logs: st.caption("暂无日志记录")
+        for log in logs[:30]: # 展示深度增加到 30 条
             with st.chat_message("assistant", avatar="🐝"):
                 parts = log.split(" || ")
                 if len(parts) >= 3:
                     st.markdown(f'<span class="time-tag">{parts[0]}</span>', unsafe_allow_html=True)
                     st.markdown(f'<div class="data-block">{parts[1]}</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="thought-block">{parts[2].replace("🧠 思考:", "").strip()}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="action-block">{parts[3]}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="action-block">{parts[3] if len(parts)>3 else "观望"}</div>', unsafe_allow_html=True)
+                else:
+                    st.caption(f"原始数据 (格式不兼容): {log}")
