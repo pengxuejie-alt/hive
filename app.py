@@ -8,7 +8,7 @@ from google import genai
 from polygon import RESTClient
 
 # --- 1. 配置与初始化 ---
-VERSION = "v4.4 (Intelligent Intent)"
+VERSION = "v4.5 (Deep Debug)"
 ACTIVE_BRAIN = "gemini-2.0-flash"
 
 def get_config(key): return os.environ.get(key) or st.secrets.get(key)
@@ -22,7 +22,13 @@ try:
 except Exception as e:
     st.error(f"❌ 蜂巢启动失败: {e}"); st.stop()
 
-# --- 2. 核心引擎 ---
+# --- 2. 核心诊断与刷新函数 ---
+def force_refresh_data():
+    """强制清理所有缓存并重读数据库"""
+    st.cache_data.clear()
+    return supabase.table("drones").select("*").order("created_at", desc=True).execute().data
+
+# --- 3. 神经调度引擎 ---
 def safe_brain_decision(prompt):
     for attempt in range(3):
         try:
@@ -34,132 +40,102 @@ def safe_brain_decision(prompt):
             if "429" in str(e): time.sleep(2); continue
             raise e
 
-def fetch_nectar(ticker):
-    try:
-        sn = poly_client.get_snapshot_ticker("stocks", ticker)
-        price = getattr(sn, 'price', 0) or (getattr(sn.last_trade, 'p', 0) if hasattr(sn, 'last_trade') else getattr(sn.prev_day, 'c', 0))
-        return {"代码": ticker, "现价": price}
-    except: return {"代码": ticker, "现价": 0}
-
-# --- 3. 演化逻辑 ---
+# --- 4. 演化逻辑 ---
 def execute_worker_cycle(d, slot):
     with slot:
         try:
             st.write("📡 **多源行情采集...**")
             targets = d.get('portfolio', ['SPY', 'GLD'])
             with ThreadPoolExecutor(max_workers=5) as exe:
-                results = list(exe.map(fetch_nectar, targets))
-            nectar_data = {r['代码']: r for r in results if r['现价'] > 0}
-            st.info(f"📊 实时行情快照: {json.dumps(nectar_data, ensure_ascii=False)}")
-
-            st.write("🧠 **神经元决策中...**")
-            prompt = f"你是工蜂{d['name']}。基因:{d['persona']}。记忆:{d.get('memory','无')}。现金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data)}。返回JSON决策。"
+                results = list(exe.map(lambda t: {"代码": t, "现价": random.uniform(150, 200)}, targets)) # 调试占位
+            nectar_data = {r['代码']: r for r in results}
+            
+            st.info(f"📊 行情透传: {json.dumps(nectar_data)}")
+            prompt = f"你是工蜂{d['name']}。基因:{d['persona']}。现金:{d['balance']}。行情:{json.dumps(nectar_data)}。返回决策JSON。"
             decision = safe_brain_decision(prompt)
 
-            nb, np, reports = float(d['balance']), (d.get('positions', {}) or {}).copy(), []
-            for t in decision.get('trades', []):
-                sym, qty, act = t.get('ticker', '').upper(), t.get('qty', 0), t.get('action', '').upper()
-                px = fetch_nectar(sym)['现价']
-                if px <= 0: continue
-                cost = qty * px * (100 if "O:" in sym else 1)
-                if act == 'BUY' and nb >= cost:
-                    nb -= cost; np[sym] = np.get(sym, 0) + qty
-                    reports.append(f"🟢买入 {sym}@{px}")
-                elif act == 'SELL' and np.get(sym, 0) >= qty:
-                    nb += cost; np[sym] -= qty
-                    if np[sym] <= 0: del np[sym]
-                    reports.append(f"🔴卖出 {sym}@{px}")
-
-            mv = sum(q * fetch_nectar(s)['现价'] * (100 if "O:" in s else 1) for s, q in np.items())
-            log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] {(' | '.join(reports) if reports else '观望')} | 🧠 {decision.get('thought','')}"
-            
+            # 更新数据库
             supabase.table("drones").update({
-                "balance": nb, "positions": np, "total_assets": round(nb + mv, 2),
-                "logs": ([log_entry] + (d.get('logs') or []))[:20],
-                "memory": decision.get('learning', d.get('memory')),
-                "fly_count": (d.get('fly_count', 0) + 1)
+                "fly_count": (d.get('fly_count', 0) + 1),
+                "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] 放飞成功"] + (d.get('logs') or []))[:10]
             }).eq("id", d["id"]).execute()
-            st.success("✅ 演化记录已存入档案")
+            st.success("✅ 数据已存入")
             time.sleep(1)
             st.rerun()
         except Exception as e:
             st.error(f"❌ 运行失败: {e}")
 
-# --- 4. 界面布局 ---
-st.set_page_config(page_title="Hive 蜂群面板", layout="wide")
+# --- 5. UI 界面 ---
+st.set_page_config(page_title="Hive 调试版", layout="wide")
+
+# 侧边栏调试台
+with st.sidebar:
+    st.subheader("🛠️ 系统诊断台")
+    if st.button("🔄 强制重载数据库"):
+        st.rerun()
+    st.caption(f"版本: {VERSION}")
 
 h1, h2 = st.columns([4, 1])
-h1.title(f"🐝 Hive 蜂群系统 `{VERSION}`")
+h1.title(f"🐝 Hive 蜂群生态系统")
 full_fly = h2.button("🔥 全量放飞", type="primary", use_container_width=True)
 
-# 强制实时获取
-def get_drones():
-    return supabase.table("drones").select("*").order("created_at", desc=True).execute().data
-
-d_res = get_drones()
-
-if full_fly and d_res:
-    for d in d_res: st.session_state[f"run_{d['id']}"] = True
+d_res = force_refresh_data()
 
 tabs = st.tabs(["🏆 工蜂档案", "👑 蜂后孵化", "⚙️ 系统管理"])
 
 with tabs[0]:
     if not d_res:
-        st.info("⚠️ 档案库为空，请先前往“蜂后孵化”页面。")
+        st.info("⚠️ 档案库暂无数据。")
     else:
         for d in d_res:
-            is_active = st.session_state.get(f"run_{d['id']}", False)
-            header = f"🐝 {d['name']} | 资产: ${d['total_assets']:,.2f} | 次数: {d.get('fly_count',0)}"
-            with st.expander(header, expanded=is_active):
-                c_info, c_data = st.columns([1, 1])
-                with c_info:
-                    st.markdown(f"**🧬 基因/性格:**\n> {d.get('persona', '待定义')}")
-                    st.markdown(f"**🧠 长期记忆:**\n> {d.get('memory', '尚无记忆')}")
-                with c_data:
-                    st.write("**📦 持仓快照:**")
+            header = f"🐝 {d['name']} | 资产: ${d['total_assets']:,.2f} | 基因: {d.get('persona','')[:15]}..."
+            with st.expander(header):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"🧬 **基因:** {d.get('persona')}")
+                    st.write(f"🧠 **记忆:** {d.get('memory')}")
+                with c2:
+                    st.write("**📦 持仓:**")
                     st.json(d.get('positions', {}))
-                    st.caption(f"⚙️ 逻辑策略: {d.get('logic', '未设定')}")
-
-                slot = st.container()
-                if st.button(f"🚀 单独演化", key=f"btn_{d['id']}") or is_active:
-                    execute_worker_cycle(d, slot)
-                    if is_active: st.session_state[f"run_{d['id']}"] = False
                 
-                for l in (d.get('logs') or [])[:5]: st.caption(l)
+                if st.button(f"🚀 单独放飞", key=f"b_{d['id']}"):
+                    execute_worker_cycle(d, st.container())
 
 with tabs[1]:
-    st.subheader("👑 蜂后智能孵化")
-    instr = st.text_area("孵化指令 (例如：孵化3只GLD工蜂，要求稳健风格):", value="孵化3只GLD工蜂")
+    st.subheader("👑 蜂后集群孵化")
+    instr = st.text_area("指令:", value="孵化3只GLD工蜂")
     
     if st.button("🔥 执行孵化"):
-        # 💡 从文案中提取数字数量
         match = re.search(r'(\d+)只', instr)
         final_count = int(match.group(1)) if match else 1
         
-        with st.spinner(f"🧬 正在解析指令，准备并行合成 {final_count} 只工蜂..."):
+        with st.spinner(f"🧬 正在合成 {final_count} 只工蜂..."):
             def spawn(idx):
-                p = f"设计JSON：{{'name':'3字中文名','logic':'','persona':'','portfolio':['GLD']}}。内容中文。指令：{instr}。扰动：{time.time()}-{idx}"
+                p = f"设计JSON：{{'name':'3字中文名','logic':'','persona':'','portfolio':['GLD']}}。内容中文。指令：{instr}"
                 try:
                     item = safe_brain_decision(p)
-                    uid = str(random.randint(1000, 9999))
+                    # 💡 增加绝对唯一的随机后缀，防止数据库因重名静默失败
+                    uid = f"{random.randint(100,999)}-{idx}"
                     item.update({
                         "name": f"{item.get('name', '工蜂')}-{uid}",
                         "balance": 100000.0, "total_assets": 100000.0,
                         "created_at": datetime.now(timezone.utc).isoformat(),
-                        "logs": ["诞生于智能指令"], "positions": {}, "fly_count": 0, "memory": "初始状态"
+                        "logs": ["诞生"], "positions": {}, "fly_count": 0, "memory": "初始"
                     })
-                    supabase.table("drones").insert(item).execute()
+                    # 💡 调试日志
+                    res = supabase.table("drones").insert(item).execute()
                     return item['name']
-                except: return None
+                except Exception as e:
+                    return f"Error: {e}"
 
             with ThreadPoolExecutor(max_workers=final_count) as exe:
                 names = list(exe.map(spawn, range(final_count)))
             
-            st.success(f"✅ 成功孵化: {', '.join(filter(None, names))}")
+            st.success(f"✅ 完成: {', '.join(filter(None, names))}")
             time.sleep(2)
             st.rerun()
 
 with tabs[2]:
-    if st.button("🔥 重置所有蜂群"):
+    if st.button("🔥 清空"):
         supabase.table("drones").delete().neq("name", "RESERVED").execute()
         st.rerun()
