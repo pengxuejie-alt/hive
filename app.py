@@ -1,20 +1,20 @@
 import streamlit as st
 
-# --- 1. 架构红线：全局常量与 UI 强制渲染 (防止 NameError & 白屏) ---
-VERSION = "v9.2.2 (Flow Fixed)"
+# --- 1. 全局常量与红线声明 ---
+VERSION = "v9.3 (AI DNA Encoding)"
 st.set_page_config(page_title="Hive 智能金融", layout="wide")
 st.title("🐝 Hive 智能金融蜂群")
-st.caption(f"{VERSION} | 灵魂压缩架构 | 系统重置功能已就绪")
+st.caption(f"{VERSION} | 术语已统一为“放飞” | AI 基因编码引擎已激活")
 
 import json, time, os, random, pytz
 import pandas as pd
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from supabase import create_client
 from google import genai 
 from polygon import RESTClient
 
-# --- 2. 核心工具函数 (1:1 虎眼镜像) ---
+# --- 2. 核心工具函数 ---
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -58,12 +58,12 @@ def fetch_tiger_intel(ticker, poly):
         return {"ticker": tk, "price": curr_p, "df": pd.DataFrame(rows).sort_values(by="成交量", ascending=False) if rows else pd.DataFrame()}
     except: return {"ticker": ticker, "price": 0.0, "df": pd.DataFrame()}
 
-# --- 3. 演化核心：语义化决策 ---
-def execute_evolution(d, slot, clients):
+# --- 3. 放飞核心逻辑 ---
+def execute_flight(d, slot, clients):
     with slot:
         persona = d.get('style', '稳健的交易员')
         targets = d.get('portfolio') or ['GLD']
-        st.write(f"📡 **{d['name']} 正在研判...**")
+        st.write(f"🚀 **{d['name']} 正在执行放飞任务...**")
         
         with ThreadPoolExecutor(max_workers=len(targets)) as exe:
             results = [exe.submit(fetch_tiger_intel, tk, clients['poly']).result() for tk in targets]
@@ -88,9 +88,9 @@ def execute_evolution(d, slot, clients):
                 "patrol_count": (d.get('patrol_count', 0) + 1),
                 "logs": ([f"[{datetime.now().strftime('%H:%M:%S')}] {decision.get('thought')}"] + (d.get('logs') or []))[:10]
             }).eq("id", d["id"]).execute()
-        except: st.error("研判中断")
+        except: st.error("放飞过程中中断")
 
-# --- 4. 初始化与数据预取 ---
+# --- 4. 初始化 ---
 cl_pkg, err = init_hive_engine()
 if err: st.error(err); st.stop()
 clients = cl_pkg
@@ -98,39 +98,47 @@ clients = cl_pkg
 try: d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
 except: d_res = []
 
-# --- 5. UI Tabs 渲染 (必须在这里统一定义) ---
+# --- 5. UI 渲染 ---
 h1, h2 = st.columns([4, 1])
 full_fly = h2.button("🚀 集群放飞", type="primary", use_container_width=True)
 
 if full_fly and d_res:
     for d in d_res:
         with st.status(f"🐝 调度 {d['name']}...", expanded=True):
-            execute_evolution(d, st.container(), clients)
+            execute_flight(d, st.container(), clients)
     st.rerun()
 
-tabs = st.tabs(["🏆 蜂群看板", "👑 灵魂孵化", "⚙️ 系统管理"])
+tabs = st.tabs(["🏆 蜂群看板", "👑 基因孵化", "⚙️ 系统管理"])
 
 with tabs[0]:
     if not d_res: st.info("空。")
     for d in d_res:
-        with st.expander(f"🐝 {d['name']} | {d.get('style','-')[:20]}...", expanded=True):
+        with st.expander(f"🐝 {d['name']} | 巡逻: {d.get('patrol_count',0)}次", expanded=True):
             st.write(f"🧬 **灵魂描述:** {d.get('style')}")
-            if st.button(f"🎯 唤醒并演化", key=f"f_{d['id']}"): execute_evolution(d, st.container(), clients)
+            if st.button(f"🚀 单独放飞", key=f"f_{d['id']}"): 
+                execute_flight(d, st.container(), clients)
 
 with tabs[1]:
-    st.subheader("👑 灵魂工程")
-    name = st.text_input("工蜂代号:", f"AI-{random.randint(100,999)}")
-    persona_text = st.text_area("输入灵魂描述 (激进程度、情绪、模型偏好等):")
-    if st.button("🔥 注入灵魂并孵化"):
-        clients['supabase'].table("drones").insert({
-            "name": name, "style": persona_text,
-            "balance": 100000.0, "total_assets": 100000.0, "portfolio": ["GLD"], "positions": {}
-        }).execute(); st.rerun()
+    st.subheader("👑 基因编码孵化器")
+    user_cmd = st.text_area("输入你的孵化指令（例如：孵化一只激进的GLD期权工蜂）:", height=100)
+    
+    if st.button("🔥 开始基因编码并孵化"):
+        if user_cmd:
+            with st.spinner("🧠 Gemini 正在进行基因编码..."):
+                # 💡 调用 AI 生成详细的灵魂描述
+                dna_prompt = f"根据用户指令 '{user_cmd}'，生成一段专业的量化交易员灵魂描述。要求包含性格倾向（激进/稳健）、核心模型（如末日博弈/波动率专家）、情绪特征（贪婪/恐惧/冷静）以及交易节奏。字数约100字，中文。"
+                dna_res = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=dna_prompt)
+                soul_description = dna_res.text
+                
+                new_name = f"AI-{random.randint(100,999)}"
+                clients['supabase'].table("drones").insert({
+                    "name": new_name, "style": soul_description,
+                    "balance": 100000.0, "total_assets": 100000.0, "portfolio": ["GLD"], "positions": {}
+                }).execute()
+                st.success(f"✅ 孵化成功！工蜂 {new_name} 已载入灵魂。")
+                st.rerun()
 
 with tabs[2]:
-    st.subheader("⚙️ 蜂巢重置")
-    st.warning("⚠️ 以下操作将永久抹除所有工蜂数据")
-    if st.button("🗑️ 确认清空所有工蜂"):
+    if st.button("🗑️ 清空所有数据"):
         clients['supabase'].table("drones").delete().neq("name", "RESERVED").execute()
-        st.success("蜂巢已重置")
         st.rerun()
