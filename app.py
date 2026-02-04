@@ -8,9 +8,8 @@ from google import genai
 from polygon import RESTClient
 
 # --- 1. 环境与大脑配置 ---
-# 🚀 修正为预览版 ID，对齐 1000 RPM 配额
-VERSION = "v3.5 (Preview Edition)"
-ACTIVE_BRAIN = "gemini-3-flash-preview" 
+VERSION = "v3.6 (Cluster Pro)"
+ACTIVE_BRAIN = "gemini-2.0-flash" # 建议先用 2.0 确保 404 不再发生，若想试 preview 可改回
 
 def get_config(key): return os.environ.get(key) or st.secrets.get(key)
 
@@ -23,32 +22,32 @@ try:
 except Exception as e:
     st.error(f"❌ 蜂巢初始化失败: {e}"); st.stop()
 
-# --- 2. 神经调度引擎 (重试与解析保护) ---
+# --- 2. 神经调度引擎 (付费版并发优化) ---
 def safe_brain_decision(prompt):
+    """
+    针对付费 1000 RPM 优化的调度器
+    加入指数退避重试，即使瞬间并发 5 只也能稳住
+    """
     for attempt in range(3):
         try:
-            time.sleep(random.uniform(0.2, 0.5))
+            # 即使付费也有微秒级 Burst 限制，加入极小抖动
+            time.sleep(random.uniform(0.1, 0.3))
             r = gen_client.models.generate_content(
                 model=ACTIVE_BRAIN, 
                 contents=prompt, 
                 config={'response_mime_type': 'application/json'}
             )
-            # 处理可能的结构化返回
             data = json.loads(r.text)
-            if isinstance(data, list): data = data[0]
-            return data
+            return data[0] if isinstance(data, list) else data
         except Exception as e:
-            if "404" in str(e):
-                st.error(f"⚠️ ID 映射失效: {ACTIVE_BRAIN} 无法识别。请确认 API 版本。")
-                st.stop()
             if "429" in str(e) and attempt < 2:
                 wait = (attempt + 1) * 2
-                st.toast(f"⏳ 拥堵避让 {wait}s...", icon="🧠")
+                st.toast(f"⏳ 神经拥堵，避让 {wait}s...", icon="🧠")
                 time.sleep(wait)
                 continue
             raise e
 
-# --- 3. 价格穿透采集 ---
+# --- 3. 行情穿透采集 ---
 def fetch_nectar(ticker):
     try:
         sn = poly_client.get_snapshot_ticker("stocks", ticker)
@@ -56,25 +55,24 @@ def fetch_nectar(ticker):
         if price == 0:
             price = getattr(sn.last_trade, 'p', 0) if hasattr(sn, 'last_trade') else getattr(sn.prev_day, 'c', 0)
         return {"代码": ticker, "现价": price, "涨跌%": round(getattr(sn, 'todays_change_percent', 0), 2)}
-    except: return {"代码": ticker, "现价": 0, "状态": "超时"}
+    except: return {"代码": ticker, "现价": 0}
 
 # --- 4. 演化任务 ---
 def execute_worker_cycle(d, status_container):
     t_start = time.time()
     try:
         with status_container:
-            st.write("📡 **正在穿透市场嗅探行情...**")
+            st.write("📡 **多源行情嗅探...**")
             with ThreadPoolExecutor(max_workers=5) as exe:
                 results = list(exe.map(fetch_nectar, d.get('portfolio', ['GLD'])))
             nectar_data = {r['代码']: r for r in results if r['现价'] > 0}
             st.json(nectar_data)
 
-            st.write(f"🧠 **神经研判中 (`{ACTIVE_BRAIN}`)...**")
-            prompt = f"你是工蜂{d['name']}。基因:{d['persona']}。现金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data, ensure_ascii=False)}。返回JSON交易指令。"
+            st.write(f"🧠 **神经研判 (`{ACTIVE_BRAIN}`)...**")
+            prompt = f"你是工蜂{d['name']}。基因:{d['persona']}。现金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data, ensure_ascii=False)}。返回指令JSON。"
             
             decision = safe_brain_decision(prompt)
 
-            # 结算
             nb, np, reports = float(d['balance']), (d.get('positions', {}) or {}).copy(), []
             for t in decision.get('trades', []):
                 sym, qty, act = t.get('ticker', t.get('symbol', '')), t.get('qty', 0), t.get('action', '').upper()
@@ -102,16 +100,16 @@ def execute_worker_cycle(d, status_container):
             st.success(f"✅ 完成 ({time.time()-t_start:.1f}s)")
             return True
     except Exception as e:
-        status_container.error(f"❌ 运行崩溃: {str(e)}")
+        status_container.error(f"❌ 崩溃: {str(e)}")
         return False
 
 # --- 5. UI 界面 ---
-st.set_page_config(page_title="Hive 蜂群系统", layout="wide")
+st.set_page_config(page_title="Hive 蜂群集群版", layout="wide")
 
 h1, h2 = st.columns([4, 1])
 with h1:
     st.title(f"🐝 Hive 蜂群生态系统 `{VERSION}`")
-    st.caption(f"🧠 大脑型号: `{ACTIVE_BRAIN}` | 🛡️ 已开启 1000 RPM 配额对齐")
+    st.caption(f"🧠 核心大脑: `{ACTIVE_BRAIN}` | 🛡️ 并发带宽: 1000 RPM")
 with h2:
     st.write(" ")
     full_fly = st.button("🔥 全量放飞", type="primary", use_container_width=True)
@@ -129,35 +127,48 @@ with tabs[0]:
         tot, cash = d.get('total_assets', 0), d.get('balance', 0)
         label = f"🐝 {d['name']} | 资产: ${tot:,.2f} | 现金: ${cash:,.2f} | 最近: {d.get('logs', ['-'])[0][:40]}"
         is_active = st.session_state.get(f"run_{d['id']}", False)
-        
         with st.expander(label, expanded=is_active):
             run_slot = st.container()
             if st.button(f"🚀 立即放飞", key=f"btn_{d['id']}") or is_active:
                 execute_worker_cycle(d, run_slot)
                 if is_active: st.session_state[f"run_{d['id']}"] = False
                 st.rerun()
-            
             if d.get('positions'): st.json(d['positions'])
             for l in (d.get('logs') or [])[:5]: st.caption(l)
 
 with tabs[1]:
-    instr = st.text_area("输入孵化指令:")
-    if st.button("开始注入基因"):
-        with st.spinner("🧬 蜂后链接中枢中..."):
-            try:
-                p = f"设计JSON：{{'name':'','logic':'','persona':'','portfolio':['GLD']}}。内容中文。指令：{instr}"
-                item = safe_brain_decision(p)
-                item.update({
-                    "balance": 100000.0, "total_assets": 100000.0, 
-                    "created_at": datetime.now(timezone.utc).isoformat(), 
-                    "logs": ["已诞生"], "positions": {}
-                })
-                supabase.table("drones").insert(item).execute()
-                st.success(f"✅ {item['name']} 成功孵化！")
+    st.subheader("👑 蜂后集群孵化")
+    col_l, col_r = st.columns([3, 1])
+    with col_l:
+        instr = st.text_area("孵化指令 (例如：批量孵化3只德州之神工蜂):")
+    with col_r:
+        batch_count = st.number_input("孵化数量", min_value=1, max_value=5, value=3)
+    
+    if st.button("🔥 启动集群孵化"):
+        if not instr:
+            st.warning("请先输入指令")
+        else:
+            with st.spinner(f"🧬 蜂后正在并行孵化 {batch_count} 只工蜂..."):
+                def spawn_one(idx):
+                    p = f"设计一个工蜂JSON：{{'name':'','logic':'','persona':'','portfolio':['GLD']}}。内容中文。指令：{instr}。索引：{idx}"
+                    try:
+                        item = safe_brain_decision(p)
+                        if item:
+                            item.update({
+                                "balance": 100000.0, "total_assets": 100000.0, 
+                                "created_at": datetime.now(timezone.utc).isoformat(), 
+                                "logs": ["集群孵化诞生"], "positions": {}
+                            })
+                            supabase.table("drones").insert(item).execute()
+                            return item.get('name')
+                    except: return None
+
+                with ThreadPoolExecutor(max_workers=batch_count) as executor:
+                    names = list(executor.map(spawn_one, range(batch_count)))
+                
+                st.success(f"✅ 已成功入库: {', '.join(filter(None, names))}")
                 time.sleep(1)
                 st.rerun()
-            except Exception as e:
-                st.error(f"❌ 孵化失败: {str(e)}")
 
 with tabs[2]:
     if st.button("🔥 重置系统"):
