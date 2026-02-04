@@ -7,9 +7,9 @@ from google import genai
 from polygon import RESTClient
 
 # ==========================================
-# 1. 初始化与专业样式
+# 1. 样式与初始化
 # ==========================================
-VERSION = "v14.6 (Full Legacy Compatible)"
+VERSION = "v14.7 (Pure Chinese Logic)"
 st.set_page_config(page_title="虎之眼智能金融审计", layout="wide")
 
 st.markdown("""
@@ -47,11 +47,10 @@ def get_verified_price(poly, ticker):
     except: return 0.0
 
 # ==========================================
-# 2. 决策逻辑 (带数据自动清洗)
+# 2. 决策逻辑 (强制中文输出)
 # ==========================================
 def execute_flight(d_id, clients, is_auto=False):
     try:
-        # 实时拉取最新日志
         d = clients['supabase'].table("drones").select("*").eq("id", d_id).single().execute().data
         est = pytz.timezone('US/Eastern')
         now_tag = datetime.now(est).strftime('%m-%d %H:%M:%S')
@@ -62,8 +61,19 @@ def execute_flight(d_id, clients, is_auto=False):
         mv_total = sum([get_verified_price(clients['poly'], s) * q * 100 for s, q in pos.items()])
         nav = cash + mv_total
 
-        tag = "[AUTO] " if is_auto else ""
-        prompt = f"你是{d['name']}。NAV ${nav:,.2f}, GLD ${curr_p:.2f}, 持仓:{json.dumps(pos)}。要求按 JSON 返回 thought 和 trades。"
+        tag = "[自动托管] " if is_auto else ""
+        
+        # 🚨 强制中文 Prompt 指令
+        prompt = f"""你是{d['name']}。性格DNA:{d.get('style')}。
+        🚨 环境底稿：
+        - 初始本金: $100,000 | 当前净值(NAV): ${nav:,.2f}
+        - {tk}现价: ${curr_p:.2f} | 现金: ${cash:,.2f} | 持仓估值: ${mv_total:,.2f}
+        - 详细持仓: {json.dumps(pos)}
+
+        要求: 
+        1. 必须使用简体中文进行思考和描述。
+        2. 严格按 JSON 返回：{{ "thought": "中文思考逻辑", "trades": [{{ "ticker": "代码", "qty": 数量, "action": "BUY/SELL" }}] }}
+        """
         
         r = clients['gen_client'].models.generate_content(model="gemini-2.0-flash", contents=prompt, config={'response_mime_type': 'application/json'})
         res = json.loads(r.text)
@@ -76,21 +86,28 @@ def execute_flight(d_id, clients, is_auto=False):
             px = get_verified_price(clients['poly'], sym)
             if px <= 0: continue
             cost = px * qty * (100 if "O:" in sym else 1)
+            
             if act == 'BUY' and nb >= cost:
                 nb -= cost; np[sym] = np.get(sym, 0) + qty
-                exec_logs.append(f"买入{qty}手 {sym} @${px:.2f}")
+                exec_logs.append(f"买入 {qty}手 {sym} @${px:.2f}")
             elif act == 'SELL' and np.get(sym, 0) >= qty:
                 nb += cost; np[sym] -= qty
                 if np[sym] <= 0: del np[sym]
-                exec_logs.append(f"卖出{qty}手 {sym} @${px:.2f}")
+                exec_logs.append(f"卖出 {qty}手 {sym} @${px:.2f}")
 
-        # 统一使用 || 分隔符，数据内部使用单一 |
-        new_entry = f"🕒 {tag}{now_tag} || 📊 GLD:${curr_p:.2f} | NAV:${nav:,.2f} | 现金:${cash:,.2f} | 持仓:${mv_total:,.2f} || 🧠 思考: {res.get('thought')} || ⚡ 行动: {(' | '.join(exec_logs) if exec_logs else '观望')}"
+        # 构造审计日志
+        data_line = f"📊 {tk}:${curr_p:.2f} | NAV:${nav:,.2f} | 现金:${cash:,.2f} | 持仓:${mv_total:,.2f}"
+        log_entry = (
+            f"🕒 {tag}{now_tag} || "
+            f"{data_line} || "
+            f"🧠 思考: {res.get('thought')} || "
+            f"⚡ 行动: {(' | '.join(exec_logs) if exec_logs else '持仓观望')}"
+        )
         
         clients['supabase'].table("drones").update({
             "balance": nb, "positions": np, 
             "patrol_count": d.get('patrol_count', 0)+1,
-            "logs": ([new_entry] + (d.get('logs') or []))[:100] # 提升到100条存储
+            "logs": ([log_entry] + (d.get('logs') or []))[:100]
         }).eq("id", d_id).execute()
         return True
     except Exception as e:
@@ -98,7 +115,7 @@ def execute_flight(d_id, clients, is_auto=False):
         return False
 
 # ==========================================
-# 3. 界面渲染 (带旧格式兼容渲染器)
+# 3. 界面渲染
 # ==========================================
 st.sidebar.title("🤖 托管中心")
 auto_mode = st.sidebar.toggle("开启 5 分钟自动托管", value=False)
@@ -115,7 +132,7 @@ for d in d_res:
                 st.cache_data.clear()
                 st.rerun()
 
-        # 数据指标展示 (同上)
+        # Metrics (现金/持仓/NAV)
         cash, pos = float(d.get('balance', 0.0)), d.get('positions', {})
         mv_total = sum([get_verified_price(clients['poly'], s) * q * 100 for s, q in pos.items()])
         m1, m2, m3, m4 = st.columns(4)
@@ -125,20 +142,13 @@ for d in d_res:
         m4.metric("审计深度", f"{len(d.get('logs') or [])}")
 
         st.divider()
-        st.write("🧠 **审计记忆 (历史全兼容模式)**")
+        st.write("🧠 **三维度审计记忆 (Data / Thought / Action)**")
         
         logs = d.get('logs', [])
         for log in logs[:20]:
             with st.chat_message("assistant", avatar="🐝"):
-                # 🚨 兼容性解析逻辑
-                if " || " in log:
-                    parts = log.split(" || ")
-                elif " | " in log:
-                    parts = log.split(" | ")
-                else:
-                    parts = [log]
-
-                # 渲染逻辑
+                # 兼容性解析
+                parts = log.split(" || ") if " || " in log else log.split(" | ")
                 if len(parts) >= 3:
                     st.markdown(f'<span class="time-tag">{parts[0]}</span>', unsafe_allow_html=True)
                     st.markdown(f'<div class="data-block">{parts[1]}</div>', unsafe_allow_html=True)
@@ -146,14 +156,12 @@ for d in d_res:
                     if len(parts) > 3:
                         st.markdown(f'<div class="action-block">{parts[3]}</div>', unsafe_allow_html=True)
                 else:
-                    # 如果只有一段或两段，直接平铺显示，不留白
                     st.info(log)
 
-# --- 托管倒计时与循环 ---
+# --- 托管逻辑 ---
 if auto_mode and d_res:
     target_id = d_res[0]['id']
     if "last_auto_run" not in st.session_state: st.session_state.last_auto_run = 0
-    
     now = time.time()
     if now - st.session_state.last_auto_run > 300:
         execute_flight(target_id, clients, is_auto=True)
@@ -162,6 +170,6 @@ if auto_mode and d_res:
         st.rerun()
     else:
         remaining = int(300 - (now - st.session_state.last_auto_run))
-        st.sidebar.metric("下次自动研判倒计时", f"{remaining} 秒")
-        time.sleep(2) # 降低刷新频率，减轻渲染负担
+        st.sidebar.metric("下次研判倒计时", f"{remaining} 秒")
+        time.sleep(2)
         st.rerun()
