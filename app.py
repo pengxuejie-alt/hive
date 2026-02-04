@@ -7,9 +7,9 @@ from google import genai
 from polygon import RESTClient
 
 # ==========================================
-# 1. 初始化
+# 1. 初始化与样式
 # ==========================================
-VERSION = "v14.3 (Hard Sync & Fix)"
+VERSION = "v14.4 (Parallel Pilot)"
 st.set_page_config(page_title="虎之眼智能金融审计", layout="wide")
 
 st.markdown("""
@@ -64,20 +64,22 @@ def get_verified_price(poly, ticker):
     except: return 0.0
 
 # ==========================================
-# 2. 决策逻辑 (Hard Persistence)
+# 2. 核心决策逻辑
 # ==========================================
-def execute_flight(d, clients, is_auto=False):
+def execute_flight(d_id, clients, is_auto=False):
     est = pytz.timezone('US/Eastern')
     now_tag = datetime.now(est).strftime('%m-%d %H:%M:%S')
+    
+    # 🚨 强行获取最新状态
+    d = clients['supabase'].table("drones").select("*").eq("id", d_id).single().execute().data
+    if not d: return False
+
     dna = d.get('style', 'Risk:Neutral')
-    
-    # 🚨 极其重要：先显式拉取最新日志，防止被缓存覆盖
-    fresh_data = clients['supabase'].table("drones").select("logs, balance, positions").eq("id", d["id"]).single().execute().data
-    current_logs = fresh_data.get('logs') or []
-    
+    current_logs = d.get('logs') or []
     tk = "GLD"
     curr_p = get_verified_price(clients['poly'], tk)
-    cash, pos = float(fresh_data['balance']), fresh_data.get('positions') or {}
+    
+    cash, pos = float(d['balance']), d.get('positions') or {}
     mv_total = sum([get_verified_price(clients['poly'], s) * q * 100 for s, q in pos.items()])
     nav = cash + mv_total
 
@@ -106,13 +108,10 @@ def execute_flight(d, clients, is_auto=False):
 
         new_entry = f"🕒 {tag}{now_tag} || 📊 GLD:${curr_p:.2f} | NAV:${nav:,.2f} | 现金:${cash:,.2f} | 持仓:${mv_total:,.2f} || 🧠 思考: {res.get('thought')} || ⚡ 行动: {(' | '.join(exec_logs) if exec_logs else '观望')}"
         
-        # 🚨 数组合并逻辑锁死
-        final_logs = ([new_entry] + current_logs)[:100]
-        
         clients['supabase'].table("drones").update({
             "balance": nb, "positions": np, 
             "patrol_count": d.get('patrol_count', 0)+1,
-            "logs": final_logs
+            "logs": ([new_entry] + current_logs)[:50]
         }).eq("id", d["id"]).execute()
         return True
     except: return False
@@ -126,29 +125,41 @@ auto_mode = st.sidebar.toggle("开启 5 分钟自动托管", value=False)
 st.title("🐝 Hive 智能金融审计中心")
 d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
 
-if auto_mode and d_res:
-    st.sidebar.warning("托管中... 正在写入黑匣子。")
-    if execute_flight(d_res[0], clients, is_auto=True):
-        st.cache_data.clear()
-        time.sleep(300)
-        st.rerun()
-
+# --- 先渲染 UI 确保按钮可见 ---
 for d in d_res:
     with st.container(border=True):
-        st.subheader(f"🐝 {d['name']} | 资产监控")
-        # 这里显示仪表盘（省略重复代码）...
+        h_l, h_r = st.columns([5, 1])
+        h_l.subheader(f"🐝 {d['name']} | 虎之眼审计看板")
+        # 🚨 手动按钮回归
+        if h_r.button(f"🚀 放飞研判", key=f"f_{d['id']}", type="primary", use_container_width=True):
+            if execute_flight(d['id'], clients): 
+                st.cache_data.clear()
+                st.rerun()
+
+        # Metrics 网格
+        cash, pos = float(d.get('balance', 0.0)), d.get('positions', {})
+        mv_total = sum([get_verified_price(clients['poly'], s) * q * 100 for s, q in pos.items()])
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("现金", f"${cash:,.2f}")
+        m2.metric("持仓市值", f"${mv_total:,.2f}")
+        m3.metric("NAV (总资产)", f"${cash+mv_total:,.2f}", delta=f"{((cash+mv_total)/100000-1)*100:.2f}%")
+        m4.metric("审计深度", f"{len(d.get('logs') or [])}")
 
         st.divider()
-        st.write("🧠 **全量决策审计记忆 (Data / Thought / Action)**")
+        st.write("🧠 **审计记忆**")
         logs = d.get('logs', [])
-        if not logs: st.caption("暂无日志记录")
-        for log in logs[:30]: # 展示深度增加到 30 条
+        for log in logs[:15]:
             with st.chat_message("assistant", avatar="🐝"):
                 parts = log.split(" || ")
                 if len(parts) >= 3:
-                    st.markdown(f'<span class="time-tag">{parts[0]}</span>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="data-block">{parts[1]}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="thought-block">{parts[2].replace("🧠 思考:", "").strip()}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="action-block">{parts[3] if len(parts)>3 else "观望"}</div>', unsafe_allow_html=True)
-                else:
-                    st.caption(f"原始数据 (格式不兼容): {log}")
+                    st.markdown(f'<span class="time-tag">{parts[0]}</span><div class="data-block">{parts[1]}</div><div class="thought-block">{parts[2].replace("🧠 思考:", "").strip()}</div><div class="action-block">{parts[3]}</div>', unsafe_allow_html=True)
+
+# --- 托管逻辑放在最后处理 ---
+if auto_mode and d_res:
+    st.sidebar.warning("自动巡逻中... 浏览器需保持开启。")
+    target_id = d_res[0]['id']
+    # 这里立即执行一次，然后进入等待循环
+    execute_flight(target_id, clients, is_auto=True)
+    time.sleep(300)
+    st.cache_data.clear()
+    st.rerun()
