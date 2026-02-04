@@ -1,13 +1,13 @@
 import streamlit as st
 import json, time, os, random, re
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import create_client
 from google import genai 
 from polygon import RESTClient
 
 # --- 1. 全局配置 ---
-VERSION = "v10.3 (Synchronous Penetration)"
+VERSION = "v10.4 (404 Path Fix)"
 st.set_page_config(page_title="Hive 智能金融", layout="wide")
 st.title("🐝 Hive 智能金融蜂群")
 
@@ -39,33 +39,43 @@ def get_val(obj, *keys):
         if v is not None: return float(v)
     return 0.0
 
-# --- 3. 🚨 核心：同步取价函数 (Debug 模式) ---
-def get_verified_price(poly, symbol):
-    # 强制加上 O: 协议头（如果没有）
+# --- 3. 🚨 终极核算：绕过 404 的 Aggs 取价法 ---
+def get_verified_price_v4(poly, symbol):
+    # 确保前缀正确
     ticker = symbol if symbol.startswith("O:") else f"O:{symbol}"
     try:
-        # 💡 这里是关键：必须区分 options 路径
-        sn = poly.get_snapshot_ticker("options", ticker.replace("O:", ""))
+        # 💡 既然 Snapshot 报 404，我们改用 Aggregates 接口
+        # 获取今天和昨天的分钟线，取最后一条
+        end = datetime.now()
+        start = end - timedelta(days=2)
         
-        # 优先级逻辑
-        lt = getattr(sn, 'last_trade', None)
-        lq = getattr(sn, 'last_quote', None)
-        day = getattr(sn, 'day', None)
+        # 调用 Aggs 接口（这是 Polygon 最稳定的底层接口）
+        aggs = poly.get_aggs(
+            ticker, 
+            1, 
+            "minute", 
+            start.strftime("%Y-%m-%d"), 
+            end.strftime("%Y-%m-%d")
+        )
         
-        # 尝试成交价 -> 尝试买卖价中值 -> 尝试当日收盘价
-        price = get_val(lt, 'p', 'price') 
-        if price <= 0:
-            bid, ask = get_val(lq, 'p', 'bid'), get_val(lq, 'P', 'ask')
-            if bid > 0 and ask > 0: price = (bid + ask) / 2
-        if price <= 0:
-            price = get_val(day, 'c', 'close')
-            
-        return price
+        if aggs:
+            # 取最后一条分钟线的收盘价
+            return float(aggs[-1].close)
+        
+        # 如果分钟线没有（可能没成交），尝试日线
+        daily_aggs = poly.get_aggs(
+            ticker, 
+            1, 
+            "day", 
+            start.strftime("%Y-%m-%d"), 
+            end.strftime("%Y-%m-%d")
+        )
+        return float(daily_aggs[-1].close) if daily_aggs else 0.01
     except Exception as e:
-        st.sidebar.error(f"Ticker {ticker} 取价失败: {e}")
+        st.sidebar.error(f"Aggs 穿透失败 {ticker}: {e}")
         return 0.0
 
-# --- 4. 渲染逻辑 ---
+# --- 4. 看板布局渲染 ---
 cl_pkg, err = init_hive_engine()
 if err: st.error(err); st.stop()
 clients = cl_pkg
@@ -73,7 +83,7 @@ clients = cl_pkg
 try: d_res = clients['supabase'].table("drones").select("*").order("created_at", desc=True).execute().data
 except: d_res = []
 
-tabs = st.tabs(["🏆 蜂群看板", "👑 基因孵化", "⚙️ 系统管理"])
+tabs = st.tabs(["🏆 蜂群看板", "👑 基因孵化", "⚙️ 管理"])
 
 with tabs[0]:
     for d in d_res:
@@ -83,21 +93,19 @@ with tabs[0]:
             mv_total = 0.0
             pos_table = []
             
-            # 🚨 这里的逻辑改写：确保对每一个持仓发起真实请求
             if pos:
-                st.write("🔍 **持仓资产实时穿透中...**")
+                st.write("🔍 **全链路穿透询价中 (Aggs Mode)...**")
                 for sym, qty in pos.items():
-                    # 这里会触发明显的等待感，说明请求发出了
-                    with st.spinner(f"正在抓取 {sym} 实时行情..."):
-                        unit_px = get_verified_price(clients['poly'], sym)
+                    with st.spinner(f"正在同步 {sym} 的 K 线数据..."):
+                        unit_px = get_verified_price_v4(clients['poly'], sym)
                         multiplier = 100 if sym.startswith("O:") else 1
                         item_mv = unit_px * qty * multiplier
                         mv_total += item_mv
                         pos_table.append({
                             "合约": parse_option_symbol(sym),
                             "数量": f"{qty} 手",
-                            "当前估价": f"${unit_px:.4f}",
-                            "估值": f"${item_mv:,.2f}"
+                            "实时单价": f"${unit_px:.4f}",
+                            "市值": f"${item_mv:,.2f}"
                         })
 
             total_assets = cash + mv_total
@@ -105,10 +113,12 @@ with tabs[0]:
 
             m1, m2, m3 = st.columns(3)
             m1.metric("现金余额 (Cash)", f"${cash:,.2f}")
-            m2.metric("持仓估值 (Market Value)", f"${mv_total:,.2f}")
+            m2.metric("持仓市值 (Market Value)", f"${mv_total:,.2f}")
             m3.metric("总资产 (Total Assets)", f"${total_assets:,.2f}", delta=f"{pnl_pct:.2f}%")
 
             st.divider()
-            # ... 其余 UI 保持不变
             if pos_table:
                 st.table(pos_table)
+            
+            if st.button(f"🚀 放飞 {d['name']}", key=f"f_{d['id']}"):
+                st.rerun()
