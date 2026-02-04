@@ -1,5 +1,5 @@
 import streamlit as st
-import pd
+import pandas as pd
 from supabase import create_client
 import json, time, os, random
 from datetime import datetime, timezone
