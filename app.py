@@ -7,29 +7,45 @@ from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from polygon import RESTClient
 
-# --- 1. 神经中枢：强制 2.0 旗舰 ---
-# 2026 官方起步标准：gemini-2.0-flash-exp
-ACTIVE_MODEL = "gemini-2.0-flash-exp"
-
+# --- 1. 神经中枢：智能 ID 映射 ---
 def get_config(key): 
     return os.environ.get(key) or st.secrets.get(key)
+
+@st.cache_resource
+def get_best_active_model():
+    """从 API 实时获取支持 generateContent 的最强模型 ID"""
+    gk = get_config("GEMINI_KEY")
+    client = genai.Client(api_key=gk)
+    try:
+        # 获取所有可用模型
+        models = client.models.list()
+        # 2026 过滤逻辑：优先寻找 2.0 flash，其次 1.5 flash，排除文本模型和旧版
+        names = [m.name for m in models if "generateContent" in m.supported_methods]
+        
+        # 优先级排序逻辑
+        priority = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-1.5-flash"]
+        for p in priority:
+            for n in names:
+                if p in n: return n
+        return names[0] if names else "gemini-1.5-flash"
+    except:
+        return "gemini-1.5-flash"
 
 try:
     S_URL, S_KEY = get_config("SUPABASE_URL"), get_config("SUPABASE_KEY")
     G_KEY, P_KEY = get_config("GEMINI_KEY"), get_config("POLYGON_KEY")
     
     supabase = create_client(S_URL, S_KEY)
-    # 使用 Google 官方 2026 标准客户端
     gen_client = genai.Client(api_key=G_KEY)
     poly_client = RESTClient(api_key=P_KEY)
     
-    # 强制进行一次 2.0 握手，失败则直接报错
-    gen_client.models.generate_content(model=ACTIVE_MODEL, contents="ping")
+    # 动态锁定当前环境真实存在的“大脑”
+    ACTIVE_MODEL = get_best_active_model()
 except Exception as e:
-    st.error(f"❌ 神经中枢 2.0 核心启动失败: {e}")
+    st.error(f"❌ 蜂巢核心启动失败: {e}")
     st.stop()
 
-# --- 2. 蜜源采集 (对齐虎之眼) ---
+# --- 2. 蜜源采集 (虎之眼穿透逻辑) ---
 def get_val(obj, *keys):
     if not obj: return 0.0
     for k in keys:
@@ -40,7 +56,6 @@ def get_val(obj, *keys):
 def fetch_nectar(ticker, needs_options=True):
     try:
         sn = poly_client.get_snapshot_ticker("stocks", ticker)
-        # 深度寻价：实时 > 昨收 > 0
         price = get_val(sn, 'price', 'c')
         if price == 0:
             price = get_val(sn.last_trade, 'p') if hasattr(sn, 'last_trade') else get_val(sn.prev_day, 'c')
@@ -48,6 +63,7 @@ def fetch_nectar(ticker, needs_options=True):
         data = {"代码": ticker, "现价": price, "涨跌": get_val(sn, 'todays_change_percent')}
         
         if needs_options and price > 0:
+            # 锁定核心区域 ±15% Strike
             opts = list(poly_client.list_snapshot_options_chain(
                 ticker, params={"strike_price.gte": price*0.85, "strike_price.lte": price*1.15, "limit": 15}
             ))
@@ -55,17 +71,19 @@ def fetch_nectar(ticker, needs_options=True):
             for o in opts:
                 vol = int(get_val(o.day, 'v'))
                 if vol < 5: continue
+                op = get_val(o.last_trade, 'p') if hasattr(o, 'last_trade') else get_val(o.day, 'c')
+                if op <= 0: continue
                 if o.details.contract_type == 'call': cv += vol
                 else: pv += vol
                 rows.append({"S": o.details.strike_price, "V": vol, "T": o.details.contract_type})
-            data["期权简报"] = {"PCR": round(pv/(cv + 1e-5), 2), "活跃数": len(rows)}
+            data["期权"] = {"PCR": round(pv/(cv + 1e-5), 2), "活跃数": len(rows)}
         return data
     except: return {"代码": ticker, "现价": 0}
 
 # --- 3. 演化任务 ---
 def run_evolution(d):
     t_start = time.time()
-    with st.status(f"🐝 工蜂 [{d['name']}] 任务中...", expanded=True) as status:
+    with st.status(f"🐝 工蜂 [{d['name']}] 任务执行中...", expanded=True) as status:
         try:
             status.write("📡 嗅探市场蜜源...")
             logic = (d.get('logic','') + d.get('persona','')).lower()
@@ -76,9 +94,9 @@ def run_evolution(d):
             nectar_data = {r['代码']: r for r in results if r['现价'] > 0}
 
             status.write(f"🧠 咨询神经中枢 (`{ACTIVE_MODEL}`)...")
-            prompt = f"工蜂{d['name']}。基因:{d['persona']}。资金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data, ensure_ascii=False)}。返回纯JSON：{{'trades':[], 'thought':'中文研判', 'learning':'演化记忆'}}"
+            prompt = f"你是工蜂{d['name']}。性格基因:{d['persona']}。可用现金:{d['balance']}。持仓:{json.dumps(d.get('positions'))}。行情:{json.dumps(nectar_data, ensure_ascii=False)}。返回纯JSON：{{'trades':[], 'thought':'中文想法', 'learning':'演化记忆'}}"
             
-            # 强制使用 2.0 模型
+            # 使用动态锚定的 ACTIVE_MODEL
             r = gen_client.models.generate_content(
                 model=ACTIVE_MODEL, 
                 contents=prompt, 
@@ -101,24 +119,24 @@ def run_evolution(d):
                     if np[sym] <= 0: del np[sym]
                     reports.append(f"🔴卖出 {sym} @{px}")
 
-            # 同步蜂房
+            # 市值重估
             mv = 0.0
             for s, q in np.items(): mv += q * fetch_nectar(s, False)['现价'] * (100 if "O:" in s else 1)
             
-            log_str = f"[{datetime.now().strftime('%H:%M:%S')}] {(' | '.join(reports) if reports else '观望')} | 🧠 {decision.get('thought','')}"
+            log_str = f"[{datetime.now().strftime('%H:%M:%S')}] {(' | '.join(reports) if reports else '观望')} | 🧠[{ACTIVE_MODEL}] {decision.get('thought','')}"
             supabase.table("drones").update({"balance": nb, "positions": np, "total_assets": round(nb + mv, 2), "logs": ([log_str] + (d.get('logs') or []))[:20], "patrol_count": (int(d.get('patrol_count') or 0)) + 1, "memory": decision.get('learning', d.get('memory'))}).eq("id", d["id"]).execute()
             
             status.update(label=f"✅ 任务完成 (耗时: {time.time()-t_start:.2f}s)", state="complete")
             return True
         except Exception as e:
-            status.update(label=f"❌ 神经元异常: {str(e)}", state="error"); return False
+            status.update(label=f"❌ 运行崩溃: {str(e)}", state="error"); return False
 
 # --- 4. UI 界面 ---
 st.set_page_config(page_title="Hive 蜂群生态", layout="wide")
 st.title("🐝 Hive 蜂群生态系统")
 
-# 强制显示锁定的 2.0 大脑
-st.warning(f"🧬 **神经中枢已强制锁定 2.0 旗舰大脑:** `{ACTIVE_MODEL}`")
+# 真实显示当前由 API 授权的 ID
+st.success(f"🧬 **神经中枢已锚定当前可用大脑:** `{ACTIVE_MODEL}`")
 
 d_res = supabase.table("drones").select("*").order("created_at", desc=True).execute().data
 col_t, col_btn = st.columns([3, 1])
@@ -142,7 +160,7 @@ with tabs[0]:
             for l in (d.get('logs') or [])[:5]: st.caption(l)
 
 with tabs[1]:
-    instr = st.text_area("输入孵化指令:")
+    instr = st.text_area("孵化指令 (中文):")
     if st.button("开始孵化"):
         p = f"设计JSON：{{'name':'','logic':'','persona':'','portfolio':['GLD']}}。内容中文。指令：{instr}"
         r = gen_client.models.generate_content(model=ACTIVE_MODEL, contents=p, config={'response_mime_type': 'application/json'})
